@@ -1,0 +1,15 @@
+{
+  "borderline_public_asset_rows": 1,
+  "borderline_study_rows": 39,
+  "dataset_locator_rows": 118,
+  "included_public_asset_rows": 11,
+  "included_study_rows": 89,
+  "public_asset_rows": 12,
+  "public_size_bytes_max_included_only": 1834239700000,
+  "public_size_bytes_max_including_borderline": 2934239700000,
+  "public_size_bytes_min_included_only": 1831439700000,
+  "public_size_bytes_min_including_borderline": 2931439700000,
+  "source_commit": "a2218f4e65818f3187f2b3c050690bd16fd21c6e",
+  "source_repo_url": "https://github.com/mmirvis/Cell-Anatomy-Scoping-Review.git",
+  "study_manifest_rows": 128
+}

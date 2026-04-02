@@ -1,0 +1,40 @@
+{
+  "dataset_id": "scion-yeast-sxt-001",
+  "title": "Yeast whole-cell anatomy under metabolic shift",
+  "paper_title": "Whole-cell imaging of budding yeast under metabolic perturbation",
+  "year": 2024,
+  "source": "BioStudies",
+  "source_type": "repository",
+  "public_data_status": "complete",
+  "species": "Saccharomyces cerevisiae",
+  "cell_type": "S. cerevisiae",
+  "tissue_or_system": null,
+  "comparator_class": "metabolic condition",
+  "comparator_detail": "glucose shift",
+  "modality": "soft X-ray tomography",
+  "modality_family": "X-ray",
+  "lateral_resolution_nm": 50,
+  "axial_resolution_nm": 50,
+  "isotropic": true,
+  "organelles": [
+    "nucleus",
+    "mitochondria",
+    "vacuole"
+  ],
+  "organelle_pairs": [
+    "mitochondria:nucleus",
+    "mitochondria:vacuole",
+    "nucleus:vacuole"
+  ],
+  "metric_families": [
+    "volume",
+    "volume_fraction",
+    "surface_area",
+    "count"
+  ],
+  "sample_size": 36,
+  "sample_size_bucket": "11-50",
+  "metadata_completeness_score": 0.94,
+  "whole_cell_boundary_confirmed": "yes",
+  "notes": "Strong candidate reference set for cross-modality comparison."
+}
