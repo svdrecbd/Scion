@@ -21,7 +21,11 @@ from psycopg import OperationalError, connect, sql
 ROOT = Path(__file__).resolve().parent.parent
 API_DIR = ROOT / "apps" / "api"
 WEB_DIR = ROOT / "apps" / "web"
-API_PYTHON = API_DIR / ".venv" / "bin" / "python"
+DEFAULT_API_PYTHON = API_DIR / ".venv" / "bin" / "python"
+API_PYTHON = Path(
+    os.environ.get("SCION_API_PYTHON")
+    or (str(DEFAULT_API_PYTHON) if DEFAULT_API_PYTHON.exists() else sys.executable)
+)
 MIGRATE_SCRIPT = ROOT / "scripts" / "db_migrate.py"
 SEED_SCRIPT = ROOT / "scripts" / "db_seed.py"
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/scion"
