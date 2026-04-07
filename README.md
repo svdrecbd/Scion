@@ -25,7 +25,7 @@ Scion is meant to make those questions fast and metadata-native.
 
 ## Quick start (Native MacOS)
 
-Scion follows a "no-bloat" ethos and runs natively without Docker.
+Scion follows a "no-bloat" ethos and runs natively without Docker. Native Postgres is the only supported local database path.
 
 ```bash
 # 1. Install Postgres (if not already present)
@@ -37,14 +37,42 @@ make bootstrap
 make db-migrate
 make db-seed
 
-# 3. Start servers
-make api
-make web
+# 3. Start the managed stack
+make stack-up
 ```
 
 Then open:
 - **Web**: `http://localhost:3000`
 - **API**: `http://localhost:8000/docs`
+
+Useful lifecycle commands:
+
+```bash
+make stack-status
+make stack-down
+```
+
+If you need to run services separately instead of the managed stack:
+
+```bash
+make api
+make web
+```
+
+For active development with reload or HMR:
+
+```bash
+make api-dev
+make web-dev
+```
+
+Verification:
+
+```bash
+make check
+```
+
+`make check` runs API tests, web typecheck, a production build, and a stack smoke test against a temporary seeded Postgres database.
 
 ## Design principles
 

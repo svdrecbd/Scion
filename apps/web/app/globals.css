@@ -4,6 +4,8 @@
   --accent: #f5f4ef;
   --accent-foreground: #555555;
   --border: rgba(0, 0, 0, 0.08);
+  --page-max-width: 1300px;
+  --page-gutter: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -34,17 +36,17 @@ a {
 }
 
 main {
-  max-width: 1120px;
+  max-width: var(--page-max-width);
   margin: 0 auto;
-  padding: 32px 20px 72px;
+  padding: 32px var(--page-gutter) 72px;
 }
 
 .navbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 20px;
-  max-width: 1120px;
+  padding: 16px var(--page-gutter);
+  max-width: var(--page-max-width);
   margin: 0 auto;
 }
 
@@ -53,9 +55,9 @@ main {
 }
 
 .navbar-secondary {
-  max-width: 1120px;
+  max-width: var(--page-max-width);
   margin: 0 auto;
-  padding: 0 20px 16px;
+  padding: 0 var(--page-gutter) 16px;
   display: flex;
   justify-content: flex-end;
 }
@@ -246,6 +248,64 @@ main {
   padding: 20px;
 }
 
+.status-ribbon {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 14px 20px;
+  border: 1px solid #d32f2f;
+  background: rgba(211, 47, 47, 0.04);
+}
+
+.status-ribbon-title {
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #d32f2f;
+}
+
+.status-ribbon-copy {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.status-ribbon-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-ribbon-tag {
+  padding: 3px 10px;
+  border: 1px solid rgba(211, 47, 47, 0.25);
+  background: var(--background);
+  font-size: 0.85rem;
+}
+
+.status-ribbon-meta {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--accent-foreground);
+  word-break: break-word;
+}
+
+.failure-debug-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  font-family: monospace;
+  font-size: 0.82rem;
+}
+
+.failure-debug-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent-foreground);
+}
+
 .panel-grid {
   display: grid;
   gap: 16px;
@@ -312,6 +372,10 @@ main {
     border-color: #81c784;
     color: #81c784;
     background: rgba(129, 199, 132, 0.05);
+  }
+
+  .status-ribbon {
+    background: rgba(211, 47, 47, 0.12);
   }
 }
 

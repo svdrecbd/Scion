@@ -7,6 +7,22 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: scion
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d scion"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SCION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/scion
 
     steps:
       - uses: actions/checkout@v4
@@ -41,3 +57,6 @@ jobs:
 
       - name: Run web build
         run: make web-build
+
+      - name: Run stack smoke test
+        run: make smoke-web

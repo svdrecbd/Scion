@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from app.observability import REQUEST_ID_HEADER
+
+
+def test_readiness_route_reports_seeded_database(integration_client: TestClient) -> None:
+    response = integration_client.get(
+        "/api/health/ready",
+        headers={REQUEST_ID_HEADER: "ready-check"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["dataset_records"] == 118
+    assert payload["applied_migrations"] >= 1
+    assert response.headers["x-request-id"] == "ready-check"
+
+
+def test_seeded_search_reads_from_postgres(integration_client: TestClient) -> None:
+    unfiltered_response = integration_client.get("/api/datasets", params={"limit": 1})
+    assert unfiltered_response.status_code == 200
+    assert unfiltered_response.json()["total"] == 118
+    assert len(unfiltered_response.json()["results"]) == 1
+
+    filtered_response = integration_client.get("/api/datasets", params={"organelle": "nucleus"})
+    assert filtered_response.status_code == 200
+
+    payload = filtered_response.json()
+    assert payload["results"]
+    assert all("nucleus" in item["organelles"] for item in payload["results"])
+    assert all(item["included_status"] == "included" for item in payload["results"])
+    assert payload["commonalities"]["top_organelles"]
+
+    facets_response = integration_client.get("/api/datasets/facets")
+    assert facets_response.status_code == 200
+    facets_payload = facets_response.json()
+    assert facets_payload["cell_types"]
+    assert facets_payload["organelles"]
+    assert facets_payload["metric_families"]
+
+
+def test_dataset_detail_and_similar_routes_work_with_seeded_ids(
+    integration_client: TestClient,
+) -> None:
+    search_response = integration_client.get("/api/datasets")
+    assert search_response.status_code == 200
+    dataset_id = search_response.json()["results"][0]["dataset_id"]
+
+    detail_response = integration_client.get(f"/api/datasets/{dataset_id}")
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    assert detail_payload["dataset_id"] == dataset_id
+    assert detail_payload["source_publication_url"]
+
+    similar_response = integration_client.get(f"/api/datasets/{dataset_id}/similar")
+    assert similar_response.status_code == 200
+    similar_payload = similar_response.json()
+    assert all(item["dataset_id"] != dataset_id for item in similar_payload)
+
+
+def test_compare_and_export_routes_use_seeded_dataset_records(
+    integration_client: TestClient,
+) -> None:
+    search_response = integration_client.get("/api/datasets")
+    assert search_response.status_code == 200
+    result_ids = [item["dataset_id"] for item in search_response.json()["results"][:2]]
+
+    compare_response = integration_client.post(
+        "/api/datasets/compare",
+        json={"dataset_ids": result_ids},
+    )
+    assert compare_response.status_code == 200
+    compare_payload = compare_response.json()
+    assert [item["dataset_id"] for item in compare_payload["datasets"]] == result_ids
+    assert 0 <= compare_payload["comparability_score"] <= 100
+
+    export_response = integration_client.get(
+        "/api/datasets/export",
+        params={"format": "json", "public": "true"},
+    )
+    assert export_response.status_code == 200
+    export_payload = export_response.json()
+    assert export_payload
+    assert all(item["public_data_status"] != "none" for item in export_payload)
+
+
+def test_analytics_routes_use_seeded_postgres_aggregates(
+    integration_client: TestClient,
+) -> None:
+    cross_tab_response = integration_client.get(
+        "/api/datasets/analytics/cross-tab",
+        params={"row": "cell_type", "col": "public_data_status"},
+        headers={REQUEST_ID_HEADER: "cross-tab-check"},
+    )
+    assert cross_tab_response.status_code == 200
+    cross_tab_payload = cross_tab_response.json()
+    assert cross_tab_payload["rows"]
+    assert cross_tab_payload["cols"]
+    assert sum(cross_tab_payload["row_totals"].values()) == 118
+    assert cross_tab_response.headers["x-request-id"] == "cross-tab-check"
+
+    frontier_response = integration_client.get(
+        "/api/datasets/analytics/frontier",
+        params={"public": "true"},
+    )
+    assert frontier_response.status_code == 200
+    frontier_payload = frontier_response.json()
+    assert frontier_payload
+    assert all(item["res"] is not None for item in frontier_payload)
+    assert all(item["ss"] is not None for item in frontier_payload)
+
+    toolkit_response = integration_client.get(
+        "/api/datasets/analytics/toolkit",
+        params={"family": "EM"},
+    )
+    assert toolkit_response.status_code == 200
+    toolkit_payload = toolkit_response.json()
+    assert toolkit_payload["modalities"] == ["EM"]
+    assert toolkit_payload["organelles"]
+
+    benchmarks_response = integration_client.get("/api/datasets/analytics/benchmarks")
+    assert benchmarks_response.status_code == 200
+    benchmarks_payload = benchmarks_response.json()
+    assert benchmarks_payload
+    assert all(item["count"] >= 1 for item in benchmarks_payload)
+    assert all("modality_family" in item for item in benchmarks_payload)
+
+    plan_response = integration_client.get(
+        "/api/datasets/analytics/plan",
+        params={"organelles": "nucleus", "res": "50", "ss": "5"},
+    )
+    assert plan_response.status_code == 200
+    plan_payload = plan_response.json()
+    assert plan_payload["status"] in {"feasible", "challenging", "high-risk", "frontier"}
+    assert plan_payload["biological_target"]
+    assert "precedents" in plan_payload
+
+
+def test_cross_tab_rejects_unsupported_dimensions(
+    integration_client: TestClient,
+) -> None:
+    response = integration_client.get(
+        "/api/datasets/analytics/cross-tab",
+        params={"row": "bogus_dimension", "col": "cell_type"},
+    )
+    assert response.status_code == 400
+    assert "Unsupported analytics dimension" in response.json()["detail"]

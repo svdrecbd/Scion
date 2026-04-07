@@ -1,5 +1,8 @@
 "use client";
 
+import { FailureDebugFooter } from "../components/failure-debug-footer";
+import { describeApiError } from "../lib/api-errors";
+
 export default function GlobalError({
   error,
   reset
@@ -7,15 +10,17 @@ export default function GlobalError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const details = describeApiError(error, "this page");
+
   return (
     <html lang="en">
       <body>
         <main style={{ padding: 32, maxWidth: 720, margin: "0 auto" }}>
-          <h1>Scion failed to load</h1>
+          <h1>{details.title}</h1>
           <p>
-            The web app does not serve fallback fixtures anymore. Fix the underlying API or
-            configuration issue and retry.
+            {details.summary}
           </p>
+          <p>{details.recommendation}</p>
           <pre
             style={{
               overflowX: "auto",
@@ -27,6 +32,7 @@ export default function GlobalError({
           >
             {error.message}
           </pre>
+          <FailureDebugFooter requestId={details.requestId} statusCode={details.statusCode} />
           <button type="button" onClick={reset}>
             Retry
           </button>

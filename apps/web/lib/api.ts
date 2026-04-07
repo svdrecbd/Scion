@@ -1,17 +1,159 @@
 import type { CompareResponse, SearchResponse, DatasetRecord } from "./types";
 
-const API_BASE_URL = typeof window === "undefined" 
-  ? "http://127.0.0.1:8000/api" 
-  : "/api";
+const REQUEST_ID_HEADER = "X-Request-ID";
+const DEFAULT_API_TIMEOUT_MS = 5000;
+
+export type ScionApiErrorKind = "timeout" | "http" | "abort" | "network";
+
+export class ScionApiError extends Error {
+  kind: ScionApiErrorKind;
+  path: string;
+  requestId?: string;
+  statusCode?: number;
+
+  constructor({
+    message,
+    kind,
+    path,
+    requestId,
+    statusCode
+  }: {
+    message: string;
+    kind: ScionApiErrorKind;
+    path: string;
+    requestId?: string;
+    statusCode?: number;
+  }) {
+    super(message);
+    this.name = "ScionApiError";
+    this.kind = kind;
+    this.path = path;
+    this.requestId = requestId;
+    this.statusCode = statusCode;
+  }
+}
+
+function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return "/api";
+  }
+
+  return (
+    process.env.SCION_API_BASE_URL ??
+    process.env.NEXT_PUBLIC_SCION_API_BASE_URL ??
+    "http://127.0.0.1:8000/api"
+  );
+}
+
+function getApiTimeoutMs(): number {
+  const rawValue =
+    process.env.SCION_API_TIMEOUT_MS ??
+    process.env.NEXT_PUBLIC_SCION_API_TIMEOUT_MS ??
+    String(DEFAULT_API_TIMEOUT_MS);
+  const parsedValue = Number(rawValue);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : DEFAULT_API_TIMEOUT_MS;
+}
+
+function createRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `scion-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 async function readJsonOrThrow<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    cache: "no-store"
-  });
+  const requestId = createRequestId();
+  const timeoutMs = getApiTimeoutMs();
+  const controller = new AbortController();
+  const headers = new Headers(init?.headers);
+  headers.set(REQUEST_ID_HEADER, requestId);
+
+  let timedOut = false;
+  let abortListener: (() => void) | undefined;
+
+  if (init?.signal) {
+    abortListener = () => controller.abort(init.signal?.reason);
+
+    if (init.signal.aborted) {
+      abortListener();
+    } else {
+      init.signal.addEventListener("abort", abortListener, { once: true });
+    }
+  }
+
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(`${getApiBaseUrl()}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (timedOut) {
+      throw new ScionApiError({
+        message: `Scion API request timed out after ${timeoutMs}ms for ${path} [request_id=${requestId}]`,
+        kind: "timeout",
+        path,
+        requestId
+      });
+    }
+
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ScionApiError({
+        message: `Scion API request was aborted for ${path} [request_id=${requestId}]`,
+        kind: "abort",
+        path,
+        requestId
+      });
+    }
+
+    if (error instanceof Error) {
+      throw new ScionApiError({
+        message: `Scion API request failed before a response for ${path}: ${error.message} [request_id=${requestId}]`,
+        kind: "network",
+        path,
+        requestId
+      });
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    if (init?.signal && abortListener) {
+      init.signal.removeEventListener("abort", abortListener);
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(`Scion API request failed: ${response.status} ${response.statusText} for ${path}`);
+    let detail = `${response.status} ${response.statusText}`;
+    let responseRequestId = response.headers.get("x-request-id") ?? requestId;
+
+    try {
+      const payload = (await response.json()) as { detail?: string; request_id?: string };
+      if (payload.detail) {
+        detail = payload.detail;
+      }
+      if (payload.request_id) {
+        responseRequestId = payload.request_id;
+      }
+    } catch {
+      // Fall back to status text when the error payload is not JSON.
+    }
+
+    throw new ScionApiError({
+      message: `Scion API request failed: ${detail} for ${path} [request_id=${responseRequestId}]`,
+      kind: "http",
+      path,
+      requestId: responseRequestId,
+      statusCode: response.status
+    });
   }
 
   return (await response.json()) as T;

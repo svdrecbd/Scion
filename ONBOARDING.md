@@ -12,7 +12,7 @@ The workflow is:
 ## 2. Engineering stance
 
 - **Thin Frontend**: Keep the UI server-side as much as possible. No heavy state libraries.
-- **Zero-Bloat**: No Docker in the default local path. Postgres runs natively.
+- **Zero-Bloat**: No Docker. Postgres runs natively and that is the only supported local DB path.
 - **Native Visualizations**: Custom SVG/CSS charts only. No external charting libraries (D3, etc.) allowed without explicit approval.
 - **Transparent Logic**: Scoring and feasibility math must be simple, documented, and backend-driven.
 
@@ -37,8 +37,30 @@ make db-seed
 
 ### Run
 ```bash
-make api   # Port 8000
-make web   # Port 3000
+make stack-up
+```
+
+### Stack lifecycle
+```bash
+make stack-status
+make stack-down
+```
+
+### Run services separately
+```bash
+make api   # Stable API on port 8000
+make web   # Stable web server on port 3000
+```
+
+### Development mode
+```bash
+make api-dev   # Reload-enabled API
+make web-dev   # Next.js dev server
+```
+
+### Verification
+```bash
+make check
 ```
 
 ## 4. Where to start reading

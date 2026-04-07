@@ -1,32 +1,71 @@
 import Link from "next/link";
+import { ApiFailurePanel } from "../components/api-failure-panel";
+import { DegradedStatusBanner } from "../components/degraded-status-banner";
 import { DatasetCard } from "../components/dataset-card";
 import { FacetBar } from "../components/facet-bar";
 import { getCompare, getDatasets, pickExampleCompareIds } from "../lib/api";
 import { CompareSummary } from "../components/compare-summary";
 import { ResultSummary } from "../components/result-summary";
+import { normalizeSearchParams, type RouteSearchParams } from "../lib/route-props";
+import type { CompareResponse, SearchResponse } from "../lib/types";
 
 export default async function HomePage({
   searchParams
 }: {
-  searchParams: { [key: string]: string | undefined };
+  searchParams: Promise<RouteSearchParams>;
 }) {
-  const searchResponse = await getDatasets(searchParams);
+  const resolvedSearchParams = normalizeSearchParams(await searchParams);
+  let searchResponse: SearchResponse;
+
+  try {
+    searchResponse = await getDatasets(resolvedSearchParams);
+  } catch (error) {
+    return (
+      <main>
+        <section className="hero" style={{ marginBottom: 48 }}>
+          <h1>Search the Corpus for Cross-Study Commonalities.</h1>
+          <p>
+            The corpus view is still available, but the backend did not return search results for
+            this request.
+          </p>
+        </section>
+        <ApiFailurePanel
+          error={error}
+          context="corpus search"
+          page="home"
+          actionHref="/"
+          actionLabel="Return to corpus root"
+        />
+      </main>
+    );
+  }
+
   const exampleIds = pickExampleCompareIds(searchResponse);
-  const comparePayload = exampleIds.length >= 2 ? await getCompare(exampleIds) : null;
-  const isTable = searchParams.view === "table";
+  let comparePayload: CompareResponse | null = null;
+  let compareError: unknown = null;
+
+  if (exampleIds.length >= 2) {
+    try {
+      comparePayload = await getCompare(exampleIds);
+    } catch (error) {
+      compareError = error;
+    }
+  }
+
+  const isTable = resolvedSearchParams.view !== "cards";
 
   // Helper to keep filters when clicking other facets
   const getFilterUrl = (newParams: Record<string, string | null>, base = "/") => {
     const params = new URLSearchParams();
     // Preserve current filters
-    if (searchParams.public === "true") params.set("public", "true");
-    if (searchParams.borderline === "true") params.set("borderline", "true");
-    if (searchParams.query) params.set("query", searchParams.query);
-    if (searchParams.family) params.set("family", searchParams.family);
-    if (searchParams.organelle) params.set("organelle", searchParams.organelle);
-    if (searchParams.modality) params.set("modality", searchParams.modality);
-    if (searchParams.pair) params.set("pair", searchParams.pair);
-    if (searchParams.view) params.set("view", searchParams.view);
+    if (resolvedSearchParams.public === "true") params.set("public", "true");
+    if (resolvedSearchParams.borderline === "true") params.set("borderline", "true");
+    if (resolvedSearchParams.query) params.set("query", resolvedSearchParams.query);
+    if (resolvedSearchParams.family) params.set("family", resolvedSearchParams.family);
+    if (resolvedSearchParams.organelle) params.set("organelle", resolvedSearchParams.organelle);
+    if (resolvedSearchParams.modality) params.set("modality", resolvedSearchParams.modality);
+    if (resolvedSearchParams.pair) params.set("pair", resolvedSearchParams.pair);
+    if (resolvedSearchParams.view) params.set("view", resolvedSearchParams.view);
     
     // Apply new filters
     Object.entries(newParams).forEach(([key, value]) => {
@@ -47,6 +86,20 @@ export default async function HomePage({
       <section className="hero" style={{ marginBottom: 48 }}>
         <h1>Search the Corpus for Cross-Study Commonalities.</h1>
       </section>
+
+      {compareError ? (
+        <DegradedStatusBanner
+          page="home"
+          title="Search View Degraded"
+          issues={[
+            {
+              label: "Compare preview",
+              context: "the example comparison panel",
+              error: compareError
+            }
+          ]}
+        />
+      ) : null}
 
       <section className="panel-grid two" style={{ marginBottom: 20 }}>
         <section className="panel">
@@ -87,13 +140,13 @@ export default async function HomePage({
         <div style={{ display: "flex", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: "12px" }}>
           <h2 className="section-title" style={{ margin: 0 }}>
             {searchResponse.total} {searchResponse.total === 1 ? "result" : "results"}
-            {searchParams.query && ` for "${searchParams.query}"`}
-            {searchParams.organelle && ` filtered by organelle: ${searchParams.organelle}`}
-            {searchParams.modality && ` filtered by modality: ${searchParams.modality}`}
-            {searchParams.family && ` filtered by family: ${searchParams.family}`}
-            {searchParams.pair && ` filtered by pair: ${searchParams.pair}`}
-            {searchParams.public === "true" && " (Public Data Only)"}
-            {searchParams.borderline === "true" && " (Including Borderline)"}
+            {resolvedSearchParams.query && ` for "${resolvedSearchParams.query}"`}
+            {resolvedSearchParams.organelle && ` filtered by organelle: ${resolvedSearchParams.organelle}`}
+            {resolvedSearchParams.modality && ` filtered by modality: ${resolvedSearchParams.modality}`}
+            {resolvedSearchParams.family && ` filtered by family: ${resolvedSearchParams.family}`}
+            {resolvedSearchParams.pair && ` filtered by pair: ${resolvedSearchParams.pair}`}
+            {resolvedSearchParams.public === "true" && " (Public Data Only)"}
+            {resolvedSearchParams.borderline === "true" && " (Including Borderline)"}
           </h2>
           
           <div style={{ marginLeft: "auto", display: "flex", gap: "16px", alignItems: "baseline" }}>
@@ -107,7 +160,7 @@ export default async function HomePage({
             <a href={exportJsonUrl} className="muted" style={{ fontSize: "0.9rem", textDecoration: "underline" }} download>JSON</a>
             <a href={exportBibtexUrl} className="muted" style={{ fontSize: "0.9rem", textDecoration: "underline" }} download>BibTeX</a>
             
-            {Object.keys(searchParams).length > 0 && (
+            {Object.keys(resolvedSearchParams).length > 0 && (
               <Link
                 href="/"
                 className="muted"
@@ -119,7 +172,7 @@ export default async function HomePage({
           </div>
         </div>
 
-        <ResultSummary response={searchResponse} searchParams={searchParams} />
+        <ResultSummary response={searchResponse} searchParams={resolvedSearchParams} />
 
         {isTable ? (
           <div style={{ overflowX: "auto" }}>
@@ -160,7 +213,19 @@ export default async function HomePage({
         )}
       </section>
 
-      {comparePayload && <CompareSummary payload={comparePayload} />}
+      {comparePayload ? (
+        <CompareSummary payload={comparePayload} />
+      ) : compareError ? (
+        <section style={{ marginTop: 24 }}>
+          <ApiFailurePanel
+            error={compareError}
+            context="the example comparison panel"
+            page="home"
+            title="Compare preview unavailable"
+            compact
+          />
+        </section>
+      ) : null}
     </main>
   );
 }

@@ -19,3 +19,4 @@ out/
 
 # Local data
 *.sqlite3
+.run/

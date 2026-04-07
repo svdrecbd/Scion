@@ -1,13 +1,16 @@
 import Link from "next/link";
+import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { getCompare } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
+import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 
 export default async function ComparePage({
   searchParams
 }: {
-  searchParams: { ids?: string };
+  searchParams: Promise<RouteSearchParams>;
 }) {
-  const ids = searchParams.ids?.split(",").filter(Boolean) || [];
+  const resolvedSearchParams = normalizeSearchParams(await searchParams);
+  const ids = resolvedSearchParams.ids?.split(",").filter(Boolean) || [];
 
   if (ids.length < 2) {
     return (
@@ -25,7 +28,37 @@ export default async function ComparePage({
     );
   }
 
-  const payload = await getCompare(ids);
+  let payload;
+
+  try {
+    payload = await getCompare(ids);
+  } catch (error) {
+    return (
+      <main>
+        <div style={{ marginBottom: 24 }}>
+          <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+            ← Back to corpus
+          </Link>
+        </div>
+
+        <section className="hero">
+          <div className="kicker">Compare View</div>
+          <h1>Compare Mode is temporarily degraded.</h1>
+          <p>
+            The selected dataset set could not be aligned right now.
+          </p>
+        </section>
+
+        <ApiFailurePanel
+          error={error}
+          context="the compare view"
+          page="compare"
+          actionHref={`/?ids=${encodeURIComponent(ids.join(","))}`}
+          actionLabel="Back to selected datasets"
+        />
+      </main>
+    );
+  }
 
   return (
     <main>

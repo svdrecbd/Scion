@@ -43,6 +43,31 @@ This is the internal working notebook for Scion.
 
 Theory crafting for the transition from a Metadata Atlas to a unified Volumetric Laboratory.
 
+### Pinned Note (2026-04-04)
+
+Full-data discussion is paused while Phase 1 UX and guidance are tightened.
+
+- Preferred cloud target is `GCS`.
+- We need to treat acquisition states explicitly:
+  - `indexed`: Scion knows the study and asset exists.
+  - `mirrored`: We have a verified copy with provenance and checksums.
+  - `streamable`: The mirrored asset has been validated and converted into a serving format such as OME-Zarr.
+- The key operational mistake to avoid is treating "we obtained the files once" as equivalent to "this dataset is ready for the product."
+- Before any asset is considered production-grade, Scion needs an ingestion contract covering:
+  - permission to mirror
+  - permission to transform
+  - permission to re-serve or stream
+  - source locator and citation requirements
+  - file manifest and checksums
+  - format/axis/voxel metadata
+  - pipeline version and validation status
+- The main risks are not storage alone. They are permissions, provenance, metadata quality, and reproducible transforms.
+- When full-data work resumes, the next design pass should define:
+  - the asset schema in Postgres
+  - GCS bucket layout
+  - worker stages
+  - what makes a dataset move from indexed -> mirrored -> streamable
+
 ### 1. The Blueprint
 - **Unified Volumetric Viewer**: Web-native 3D slicing (Neuroglancer/OME-Zarr) to compare volumes side-by-side without downloads.
 - **Cross-Study "Virtual Staining"**: Unified segmentation overlays. Toggle "Mitochondria" across 15+ different studies simultaneously.

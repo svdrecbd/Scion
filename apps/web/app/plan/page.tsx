@@ -1,27 +1,62 @@
 import React from "react";
 import Link from "next/link";
+import { ApiFailurePanel } from "../../components/api-failure-panel";
+import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { getDatasets, getExperimentPlan } from "../../lib/api";
 import { DatasetCard } from "../../components/dataset-card";
+import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 
 export default async function PlanPage({
   searchParams
 }: {
-  searchParams: { organelles?: string; res?: string; ss?: string };
+  searchParams: Promise<RouteSearchParams>;
 }) {
-  const isPlanning = searchParams.organelles && searchParams.res && searchParams.ss;
+  const resolvedSearchParams = normalizeSearchParams(await searchParams);
+  const isPlanning =
+    resolvedSearchParams.organelles &&
+    resolvedSearchParams.res &&
+    resolvedSearchParams.ss;
   
   let analysis = null;
+  let analysisError: unknown = null;
   if (isPlanning) {
-    analysis = await getExperimentPlan(
-      searchParams.organelles!,
-      parseFloat(searchParams.res!),
-      parseInt(searchParams.ss!)
-    );
+    try {
+      analysis = await getExperimentPlan(
+        resolvedSearchParams.organelles!,
+        parseFloat(resolvedSearchParams.res!),
+        parseInt(resolvedSearchParams.ss!)
+      );
+    } catch (error) {
+      analysisError = error;
+    }
   }
 
-  // Get common organelles for the dropdown
-  const searchResponse = await getDatasets();
-  const commonOrganelles = searchResponse.commonalities.top_organelles;
+  let commonOrganelles: string[] = [];
+  let corpusLookupError: unknown = null;
+
+  try {
+    const searchResponse = await getDatasets();
+    commonOrganelles = searchResponse.commonalities.top_organelles;
+  } catch (error) {
+    corpusLookupError = error;
+  }
+
+  const degradedIssues = [
+    analysisError
+      ? {
+          label: "Experiment analysis",
+          context: "the experiment plan analysis",
+          error: analysisError
+        }
+      : null,
+    corpusLookupError
+      ? {
+          label: "Corpus suggestions",
+          context: isPlanning ? "planner corpus suggestions" : "planner organelle suggestions",
+          error: corpusLookupError
+        }
+      : null
+  ].filter(Boolean) as Array<{ label: string; context: string; error: unknown }>;
 
   return (
     <main>
@@ -33,17 +68,48 @@ export default async function PlanPage({
         </p>
       </section>
 
+      {degradedIssues.length > 0 ? (
+        <DegradedStatusBanner
+          page="plan"
+          title="Planner Degraded"
+          issues={degradedIssues}
+        />
+      ) : null}
+
       {!isPlanning ? (
         <section className="panel" style={{ marginTop: 48, maxWidth: "600px" }}>
+          {corpusLookupError ? (
+            <div style={{ marginBottom: 20 }}>
+              <ApiFailurePanel
+                error={corpusLookupError}
+                context="planner organelle suggestions"
+                page="plan"
+                title="Corpus-backed suggestions unavailable"
+                compact
+              />
+            </div>
+          ) : null}
           <form action="/plan" style={{ display: "grid", gap: "24px" }}>
             <div>
               <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Target Organelles</label>
-              <select name="organelles" className="search-input" style={{ width: "100%" }} required>
-                <option value="">Select an organelle...</option>
-                {commonOrganelles.map(o => (
-                  <option key={o} value={o}>{o}</option>
-                ))}
-              </select>
+              {commonOrganelles.length > 0 ? (
+                <select name="organelles" className="search-input" style={{ width: "100%" }} required>
+                  <option value="">Select an organelle...</option>
+                  {commonOrganelles.map((o) => (
+                    <option key={o} value={o}>{o}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  name="organelles"
+                  defaultValue={resolvedSearchParams.organelles ?? ""}
+                  className="search-input"
+                  style={{ width: "100%" }}
+                  placeholder="e.g. mitochondria"
+                  required
+                />
+              )}
               <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>Select the primary structure you intend to quantify.</p>
             </div>
 
@@ -70,62 +136,82 @@ export default async function PlanPage({
             </Link>
           </div>
 
-          <div className="panel-grid two">
-            <div className="summary-grid">
-              <section className="panel" style={{ borderLeft: `8px solid ${getStatusColor(analysis.status)}` }}>
-                <div className="kicker" style={{ color: getStatusColor(analysis.status) }}>{analysis.status.toUpperCase()}</div>
-                <h2 className="section-title">Feasibility Report</h2>
-                <p style={{ fontSize: "1.1rem", lineHeight: 1.6 }}>{analysis.status_message}</p>
-              </section>
+          {analysis ? (
+            <div className="panel-grid two">
+              <div className="summary-grid">
+                <section className="panel" style={{ borderLeft: `8px solid ${getStatusColor(analysis.status)}` }}>
+                  <div className="kicker" style={{ color: getStatusColor(analysis.status) }}>{analysis.status.toUpperCase()}</div>
+                  <h2 className="section-title">Feasibility Report</h2>
+                  <p style={{ fontSize: "1.1rem", lineHeight: 1.6 }}>{analysis.status_message}</p>
+                </section>
 
-              <section className="panel">
-                <h2 className="section-title">Modality Recommendation</h2>
-                <p>{analysis.modality_recommendation}</p>
-              </section>
+                <section className="panel">
+                  <h2 className="section-title">Modality Recommendation</h2>
+                  <p>{analysis.modality_recommendation}</p>
+                </section>
 
-              <section className="panel">
-                <h2 className="section-title">Comparability Benchmarks</h2>
-                <p className="muted">To align with the existing corpus for <strong>{analysis.biological_target}</strong>, prioritize these metrics:</p>
-                <div className="pill-row" style={{ marginTop: 12 }}>
-                  {analysis.standard_metrics.map((m: string) => (
-                    <span key={m} className="pill">{m}</span>
-                  ))}
-                </div>
-              </section>
+                <section className="panel">
+                  <h2 className="section-title">Comparability Benchmarks</h2>
+                  <p className="muted">To align with the existing corpus for <strong>{analysis.biological_target}</strong>, prioritize these metrics:</p>
+                  <div className="pill-row" style={{ marginTop: 12 }}>
+                    {analysis.standard_metrics.map((m: string) => (
+                      <span key={m} className="pill">{m}</span>
+                    ))}
+                  </div>
+                </section>
 
-              <section className="panel">
-                <h2 className="section-title">Full Precedent List</h2>
-                <p className="muted" style={{ marginBottom: 16 }}>Every dataset in the corpus that informs this feasibility assessment:</p>
-                <div className="dataset-grid">
-                  {analysis.precedents.map((p: any) => (
-                    <DatasetCard key={p.dataset_id} dataset={p} />
-                  ))}
-                </div>
-              </section>
+                <section className="panel">
+                  <h2 className="section-title">Full Precedent List</h2>
+                  <p className="muted" style={{ marginBottom: 16 }}>Every dataset in the corpus that informs this feasibility assessment:</p>
+                  <div className="dataset-grid">
+                    {analysis.precedents.map((p: any) => (
+                      <DatasetCard key={p.dataset_id} dataset={p} />
+                    ))}
+                  </div>
+                </section>
+              </div>
+
+              <aside style={{ display: "grid", gap: 16 }}>
+                <section className="panel">
+                  <h2 className="section-title">Baseline Data</h2>
+                  <p className="muted">Download these public datasets for your project:</p>
+                  <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                    {analysis.suggested_baselines.length > 0 ? (
+                      analysis.suggested_baselines.map((b: any) => (
+                        <Link key={b.dataset_id} href={`/datasets/${b.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "12px" }}>
+                          <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{b.modality} · {b.cell_type}</div>
+                          <div style={{ fontWeight: 500, fontSize: "0.95rem" }}>{b.title}</div>
+                          <div className="pill pill-link" style={{ marginTop: 8, textAlign: "center", fontSize: "0.8rem" }}>
+                            View Reusable Data
+                          </div>
+                        </Link>
+                      ))
+                    ) : (
+                      <span className="muted">No public baseline data found for this target.</span>
+                    )}
+                  </div>
+                </section>
+              </aside>
             </div>
-
-            <aside style={{ display: "grid", gap: 16 }}>
-              <section className="panel">
-                <h2 className="section-title">Baseline Data</h2>
-                <p className="muted">Download these public datasets for your project:</p>
-                <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-                  {analysis.suggested_baselines.length > 0 ? (
-                    analysis.suggested_baselines.map((b: any) => (
-                      <Link key={b.dataset_id} href={`/datasets/${b.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "12px" }}>
-                        <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{b.modality} · {b.cell_type}</div>
-                        <div style={{ fontWeight: 500, fontSize: "0.95rem" }}>{b.title}</div>
-                        <div className="pill pill-link" style={{ marginTop: 8, textAlign: "center", fontSize: "0.8rem" }}>
-                          View Reusable Data
-                        </div>
-                      </Link>
-                    ))
-                  ) : (
-                    <span className="muted">No public baseline data found for this target.</span>
-                  )}
-                </div>
-              </section>
-            </aside>
-          </div>
+          ) : (
+            <ApiFailurePanel
+              error={analysisError}
+              context="the experiment plan analysis"
+              page="plan"
+              title="Experiment analysis unavailable"
+            />
+          )}
+          {corpusLookupError ? (
+            <div style={{ marginTop: 20 }}>
+              <ApiFailurePanel
+                error={corpusLookupError}
+                context="planner corpus suggestions"
+                page="plan"
+                title="Corpus suggestion sidebar unavailable"
+                compact
+              />
+            </div>
+          ) : null}
         </div>
       )}
     </main>

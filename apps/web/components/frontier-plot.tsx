@@ -18,7 +18,7 @@ type Props = {
 export function FrontierPlot({ data }: Props) {
   const [hovered, setHovered] = useState<DataPoint | null>(null);
   const [scaleX, setScaleX] = useState<"log" | "linear">("log");
-  const [scaleY, setScaleY] = useState<"log" | "linear">("linear");
+  const [scaleY, setScaleY] = useState<"log" | "linear">("log");
   const router = useRouter();
 
   // SVG dimensions

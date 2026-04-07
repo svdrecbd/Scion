@@ -1,15 +1,60 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
+import { ApiFailurePanel } from "../../../components/api-failure-panel";
+import { DegradedStatusBanner } from "../../../components/degraded-status-banner";
 import { getDataset, getSimilarDatasets } from "../../../lib/api";
+import { isNotFoundApiError } from "../../../lib/api-errors";
+import type { DatasetRecord } from "../../../lib/types";
 import { FacetBar } from "../../../components/facet-bar";
 import { CitationButton } from "../../../components/citation-button";
 
 export default async function DatasetPage({
   params
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  const dataset = await getDataset(params.id);
-  const similar = await getSimilarDatasets(params.id);
+  const { id } = await params;
+  let dataset: DatasetRecord;
+
+  try {
+    dataset = await getDataset(id);
+  } catch (error) {
+    if (isNotFoundApiError(error)) {
+      notFound();
+    }
+
+    return (
+      <main>
+        <div style={{ marginBottom: 24 }}>
+          <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+            ← Back to corpus
+          </Link>
+        </div>
+        <section className="hero">
+          <h1>Dataset detail unavailable.</h1>
+          <p>
+            The dataset record could not be loaded right now, so the page is showing a degraded state.
+          </p>
+        </section>
+        <ApiFailurePanel
+          error={error}
+          context={`dataset ${id}`}
+          page="dataset-detail"
+          actionHref="/"
+          actionLabel="Return to corpus"
+        />
+      </main>
+    );
+  }
+
+  let similar: DatasetRecord[] = [];
+  let similarError: unknown = null;
+
+  try {
+    similar = await getSimilarDatasets(id);
+  } catch (error) {
+    similarError = error;
+  }
 
   return (
     <main>
@@ -43,6 +88,20 @@ export default async function DatasetPage({
           </div>
         </div>
       </section>
+
+      {similarError ? (
+        <DegradedStatusBanner
+          page="dataset-detail"
+          title="Dataset Detail Degraded"
+          issues={[
+            {
+              label: "Similar datasets",
+              context: "similar dataset recommendations",
+              error: similarError
+            }
+          ]}
+        />
+      ) : null}
 
       <div className="panel-grid two" style={{ marginTop: 32 }}>
         <div className="summary-grid">
@@ -124,6 +183,15 @@ export default async function DatasetPage({
               </div>
             </section>
           )}
+          {similarError ? (
+            <ApiFailurePanel
+              error={similarError}
+              context="similar dataset recommendations"
+              page="dataset-detail"
+              title="Similar-dataset panel unavailable"
+              compact
+            />
+          ) : null}
 
           <FacetBar
             title="Organelles Captured"
