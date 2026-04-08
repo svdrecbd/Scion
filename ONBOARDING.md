@@ -63,6 +63,8 @@ make web-dev   # Next.js dev server
 make check
 ```
 
+If you are only editing wording, guide copy, or page labels, you usually do not need the full stack immediately. Start by reading the relevant page/component file and make small edits there first.
+
 ## 4. Where to start reading
 
 - `README.md` - Core product vision.
@@ -71,9 +73,20 @@ make check
 - `apps/api/app/services/plan.py` - The feasibility engine for experiment planning.
 - `apps/web/app/analytics/page.tsx` - Custom SVG visualizations.
 
+If you are doing copy or guidance work, start here instead:
+
+- `apps/web/app/guide/page.tsx` - The user-facing guide.
+- `apps/web/app/page.tsx` - Corpus landing page copy and layout.
+- `apps/web/app/analytics/page.tsx` - Analytics page framing and explanatory text.
+- `apps/web/app/plan/page.tsx` - Planner copy and interpretation language.
+- `apps/web/components/navbar.tsx` - Global navigation labels.
+
+For simple wording changes, GitHub web editing is fine. For behavior changes, use a branch and open a PR.
+
 ## 5. Team rules
 
 1. **Boxes only**: Use `border-radius: 0px` for all new UI elements.
 2. **Typography first**: Use standard EB Garamond weights. No bold headers without reason.
 3. **URL is the state**: All filters, selections, and search terms must be reflected in the URL for shareability.
 4. **SQL First**: Perform as much data narrowing as possible in Postgres before it reaches Python.
+5. **Copy should clarify, not posture**: prefer practical explanation over product language.

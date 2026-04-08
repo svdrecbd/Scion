@@ -21,15 +21,23 @@ This is the internal working notebook for Scion.
 - Integrated automated Baseline Data discovery for segmentation training sets.
 
 ### Phase 4: Scientific Utility & Polish
-- Implemented **Export Engine** (CSV and JSON streaming).
-- Added **Citation Engine** (APA formatting).
+- Implemented **Export Engine** (CSV, JSON, and BibTeX).
+- Added record-level citation copy support in the dataset detail view.
 - Applied "Scion Style": sharp-edged (0px radius), EB Garamond typography, and soft dark-grey theme.
+
+### Phase 5: Hardening & Operations
+- Removed Docker from the supported local workflow.
+- Added managed native stack scripts, readiness checks, and structured request/query logging.
+- Added DB-backed API integration tests and a full stack smoke test.
+- Shifted more expensive analytics/search work into SQL to keep the API fast and low-bloat.
+- Fixed CI so local `Makefile` targets work both with the repo venv and with GitHub Actions runner Python.
 
 ## dead ends & decisions
 
 - **Rejected: Docker**. Decided native Postgres setup aligns better with the "no-bloat" ethos and reduces overhead for local dev.
 - **Decision: Raw SVG**. Rejected Recharts/D3 to keep the frontend bundle under 100KB and ensure pixel-perfect typography integration.
 - **Decision: Borderline Studies**. Instead of excluding near-misses, we chose to "badge and reveal" to maximize evidence transparency.
+- **Decision: Thin frontend**. The main latency pressure is page composition, not the API. Keep backend semantics strong and avoid frontend-state bloat unless the product genuinely needs it.
 
 ## Team Rules
 
@@ -38,6 +46,17 @@ This is the internal working notebook for Scion.
 3. No silent failures.
 4. No bold headers.
 5. 0px border radius is the law.
+
+## Collaboration notes
+
+- Safe copy-edit surfaces usually live in:
+  - `apps/web/app/guide/page.tsx`
+  - `apps/web/app/page.tsx`
+  - `apps/web/app/analytics/page.tsx`
+  - `apps/web/app/plan/page.tsx`
+  - `apps/web/components/navbar.tsx`
+- If a collaborator is mostly editing language, GitHub web editing is enough.
+- If a collaborator is changing behavior, they should use a branch/PR flow even if they have write access.
 
 ## Future Phase: Full Data Scion (The 3TB Horizon)
 

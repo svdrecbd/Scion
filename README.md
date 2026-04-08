@@ -10,7 +10,7 @@ Scion is a structured lookup and comparison layer for whole-cell imaging dataset
 - **Analytics Suite**: Visualize the Imaging Frontier (Res vs SS), Toolkit Matrix (Organelle vs Modality), and Gap Finder (White-Space Exploration).
 - **Experiment Assistant**: A feasibility engine that validates new experiment plans against historical benchmarks.
 - **Comparison Workbench**: Side-by-side technical alignment with shared-trait highlighting and comparability scoring.
-- **Scientific Utility**: Copy-paste APA citations and export filtered result sets as standardized CSV or JSON.
+- **Scientific Utility**: Copy record citations, export filtered result sets as CSV/JSON, and download BibTeX from the corpus view.
 
 ## Why this exists
 
@@ -23,7 +23,7 @@ Researchers can usually find individual papers and repositories. What is still h
 
 Scion is meant to make those questions fast and metadata-native.
 
-## Quick start (Native MacOS)
+## Quick start (Native macOS)
 
 Scion follows a "no-bloat" ethos and runs natively without Docker. Native Postgres is the only supported local database path.
 
@@ -44,6 +44,8 @@ make stack-up
 Then open:
 - **Web**: `http://localhost:3000`
 - **API**: `http://localhost:8000/docs`
+
+If `3000` or `8000` is already occupied, stop the old process before starting the managed stack again.
 
 Useful lifecycle commands:
 
@@ -95,7 +97,19 @@ make check
 - [x] Comprehensive Analytics (Frontier, Toolkit, Gaps).
 - [x] Experiment Planning Assistant (Feasibility scoring).
 - [x] Borderline study explorer for "near-miss" transparency.
-- [x] Export Engine (CSV/JSON).
+- [x] Export Engine (CSV/JSON/BibTeX).
+- [x] Managed local stack, readiness checks, and GitHub Actions CI.
+
+## Collaboration notes
+
+- For copy and guidance edits, the highest-value files are usually:
+  - `apps/web/app/guide/page.tsx`
+  - `apps/web/app/page.tsx`
+  - `apps/web/app/analytics/page.tsx`
+  - `apps/web/app/plan/page.tsx`
+  - `apps/web/components/navbar.tsx`
+- For purely textual changes, GitHub web edits are usually enough.
+- For anything that changes behavior, prefer a branch and pull request even if you have write access.
 
 ## Repository structure
 

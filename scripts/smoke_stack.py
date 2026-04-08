@@ -138,13 +138,16 @@ def managed_process(command: list[str], *, cwd: Path, env: dict[str, str], name:
 def main() -> None:
     api_port = free_port()
     web_port = free_port()
+    print(f"smoke: api_port={api_port} web_port={web_port}", flush=True)
 
     with temp_database() as database_url:
         api_env = os.environ.copy()
         api_env["SCION_DATABASE_URL"] = database_url
+        api_base_url = f"http://127.0.0.1:{api_port}/api"
 
         web_env = os.environ.copy()
-        web_env["NEXT_PUBLIC_SCION_API_BASE_URL"] = f"http://127.0.0.1:{api_port}/api"
+        web_env["SCION_API_BASE_URL"] = api_base_url
+        web_env["NEXT_PUBLIC_SCION_API_BASE_URL"] = api_base_url
 
         with managed_process(
             [str(API_PYTHON), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(api_port)],
@@ -152,10 +155,12 @@ def main() -> None:
             env=api_env,
             name="api",
         ):
+            print("smoke: waiting for API health", flush=True)
             health = wait_for_json(f"http://127.0.0.1:{api_port}/api/health")
             if health != {"status": "ok"}:
                 raise RuntimeError(f"Unexpected API health payload: {health}")
 
+            print("smoke: fetching dataset seed slice", flush=True)
             datasets = wait_for_json(f"http://127.0.0.1:{api_port}/api/datasets")
             if not isinstance(datasets, dict) or not datasets.get("results"):
                 raise RuntimeError("Seeded API returned no datasets during smoke test.")
@@ -180,6 +185,7 @@ def main() -> None:
                 ]
 
                 for url in urls:
+                    print(f"smoke: checking {url}", flush=True)
                     status = wait_for_status(url)
                     if status != 200:
                         raise RuntimeError(f"Unexpected status {status} for {url}")
