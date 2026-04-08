@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -110,29 +111,30 @@ def temp_database() -> str:
 
 @contextmanager
 def managed_process(command: list[str], *, cwd: Path, env: dict[str, str], name: str):
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    try:
-        yield process
-    finally:
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        if process.returncode not in (0, None, -2):
-            output = ""
-            if process.stdout is not None:
-                output = process.stdout.read()
-            raise RuntimeError(f"{name} exited unexpectedly:\n{output}")
+    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            yield process
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            if process.returncode not in (0, None, -2):
+                log_file.flush()
+                log_file.seek(0)
+                output = log_file.read()
+                raise RuntimeError(f"{name} exited unexpectedly:\n{output}")
 
 
 def main() -> None:
