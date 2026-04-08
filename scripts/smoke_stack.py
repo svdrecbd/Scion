@@ -30,6 +30,7 @@ API_PYTHON = Path(
 MIGRATE_SCRIPT = ROOT / "scripts" / "db_migrate.py"
 SEED_SCRIPT = ROOT / "scripts" / "db_seed.py"
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/scion"
+GRACEFUL_EXIT_CODES = {0, None, -2, 130}
 
 
 def with_database_name(database_url: str, database_name: str) -> str:
@@ -130,7 +131,7 @@ def managed_process(command: list[str], *, cwd: Path, env: dict[str, str], name:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
-            if process.returncode not in (0, None, -2):
+            if process.returncode not in GRACEFUL_EXIT_CODES:
                 log_file.flush()
                 log_file.seek(0)
                 output = log_file.read()
