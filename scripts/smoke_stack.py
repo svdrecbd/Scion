@@ -22,6 +22,7 @@ from psycopg import OperationalError, connect, sql
 ROOT = Path(__file__).resolve().parent.parent
 API_DIR = ROOT / "apps" / "api"
 WEB_DIR = ROOT / "apps" / "web"
+NEXT_BIN = WEB_DIR / "node_modules" / ".bin" / "next"
 DEFAULT_API_PYTHON = API_DIR / ".venv" / "bin" / "python"
 API_PYTHON = Path(
     os.environ.get("SCION_API_PYTHON")
@@ -173,7 +174,7 @@ def main() -> None:
                 raise RuntimeError("Need at least two dataset ids for compare smoke test.")
 
             with managed_process(
-                ["npm", "run", "start", "--", "--hostname", "127.0.0.1", "--port", str(web_port)],
+                [str(NEXT_BIN), "start", "--hostname", "127.0.0.1", "--port", str(web_port)],
                 cwd=WEB_DIR,
                 env=web_env,
                 name="web",
