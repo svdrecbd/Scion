@@ -21,7 +21,7 @@ export function HeroSearch({ initialQuery, initialPublic, initialBorderline, onl
     } else {
       params.delete(key);
     }
-    router.push(`/?${params.toString()}`);
+    router.push(`/corpus${params.toString() ? `?${params.toString()}` : ""}`);
   };
 
   if (onlyToggle) {
@@ -48,7 +48,7 @@ export function HeroSearch({ initialQuery, initialPublic, initialBorderline, onl
   }
 
   return (
-    <form action="/" className="search-row" style={{ marginTop: 24, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "20px" }}>
+    <form action="/corpus" className="search-row" style={{ marginTop: 24, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "20px" }}>
       <div style={{ flex: 1, minWidth: "300px", display: "flex", gap: "12px" }}>
         <input
           type="text"

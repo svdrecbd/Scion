@@ -86,7 +86,7 @@ export default async function AnalyticsPage({
           error={primaryAnalyticsError}
           context="the analytics suite"
           page="analytics"
-          actionHref="/"
+          actionHref="/corpus"
           actionLabel="Back to corpus"
         />
       ) : null}
@@ -142,7 +142,7 @@ export default async function AnalyticsPage({
                         <td key={modality} style={{ padding: "12px", borderBottom: "1px solid var(--border)", textAlign: "center", verticalAlign: "middle" }}>
                           {count > 0 ? (
                             <Link 
-                              href={`/?organelle=${encodeURIComponent(organelle)}&family=${encodeURIComponent(modality)}`}
+                              href={`/corpus?organelle=${encodeURIComponent(organelle)}&family=${encodeURIComponent(modality)}`}
                               title={`${count} datasets`}
                               style={{ 
                                 display: "block",
@@ -292,7 +292,7 @@ export default async function AnalyticsPage({
                         >
                           {count > 0 ? (
                             <Link 
-                              href={`/?${params.toString()}`}
+                              href={`/corpus?${params.toString()}`}
                               style={{ 
                                 display: "block",
                                 padding: "16px 8px",

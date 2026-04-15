@@ -1,53 +1,6 @@
 import React from "react";
 import Link from "next/link";
 
-const coreUses = [
-  {
-    title: "Find precedent",
-    copy: "See which studies already cover a cell type, organelle, modality, or technical range."
-  },
-  {
-    title: "Compare records",
-    copy: "Line up a few plausible studies side by side and see where they are aligned or mismatched."
-  },
-  {
-    title: "Map the field",
-    copy: "Use analytics to see what is crowded, what is sparse, and where public data is missing."
-  },
-  {
-    title: "Benchmark a plan",
-    copy: "Check whether a proposed target, resolution, and sample size look well-precedented or frontier."
-  }
-];
-
-const screens = [
-  {
-    title: "Corpus",
-    href: "/",
-    copy: "Start here. Search and filter the atlas, scan records quickly in table view, or switch to cards when you want more context."
-  },
-  {
-    title: "Dataset detail",
-    href: "/datasets/deshmukh-2024-092",
-    copy: "Use this page when you need to inspect one record properly: specs, provenance, notes, public-data status, and similar studies."
-  },
-  {
-    title: "Compare",
-    href: "/compare",
-    copy: "Use this after you have picked a few candidate studies and want to see whether they are similar enough to reason about together."
-  },
-  {
-    title: "Analytics",
-    href: "/analytics",
-    copy: "Use this to understand corpus-wide patterns: technical tradeoffs, modality-organelles coverage, and reporting gaps."
-  },
-  {
-    title: "Plan",
-    href: "/plan",
-    copy: "Use this to benchmark a proposed experiment against what the atlas already contains."
-  }
-];
-
 const badges = [
   {
     label: "Res",
@@ -81,215 +34,128 @@ export default function GuidePage() {
     <main>
       <section className="hero">
         <div className="kicker">Guide</div>
-        <h1>How to Use Scion</h1>
+        <h1>How to Interpret Scion</h1>
         <p>
-          Scion helps you find relevant whole-cell imaging studies, inspect how they were reported,
-          compare them, and understand where the corpus is strong or thin.
+          Use this page when you need the meaning of a score, badge, or status label. For general
+          orientation, start from the landing page. For project context and source links, use
+          About.
         </p>
-      </section>
-
-      <section
-        className="panel"
-        style={{
-          marginTop: 36,
-          display: "grid",
-          gap: 18,
-          background: "var(--background)",
-          borderColor: "var(--foreground)"
-        }}
-      >
-        <div className="kicker" style={{ margin: 0 }}>What You Can Do Here</div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: 16
-          }}
-        >
-          {coreUses.map((item) => (
-            <section key={item.title} className="panel" style={{ background: "var(--accent)" }}>
-              <h2 className="section-title">{item.title}</h2>
-              <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
-                {item.copy}
-              </p>
-            </section>
-          ))}
-        </div>
       </section>
 
       <section className="panel-grid two" style={{ marginTop: 32 }}>
         <section className="panel">
-          <h2 className="section-title">Best Way to Start</h2>
-          <ol style={{ margin: 0, paddingLeft: 20, display: "grid", gap: 12 }}>
-            <li>Open the corpus and search for a cell type, organelle, or modality family.</li>
-            <li>Use the default table view to scan records quickly.</li>
-            <li>Open one or two promising dataset pages and read the provenance and curation notes.</li>
-            <li>Switch to card view if you want to build a compare set.</li>
-            <li>Use Analytics once you want the field-level picture instead of the record-level picture.</li>
-          </ol>
+          <h2 className="section-title">Comparability Score</h2>
+          <p className="muted" style={{ margin: "0 0 14px", lineHeight: 1.7 }}>
+            This is a ranking aid for likely overlap, not a claim that two studies are equivalent.
+            It rewards shared biology and shared technical structure, then compresses that into a
+            quick reading. A high score means “look here first,” not “pool these records without
+            caveats.”
+          </p>
+          <div style={{ display: "grid", gap: 8 }}>
+            <div className="muted" style={{ fontSize: "0.95rem" }}>
+              Current heuristic:
+            </div>
+            <div className="muted" style={{ display: "grid", gap: 6, lineHeight: 1.6 }}>
+              <div><strong>+25</strong> if all selected datasets share the same cell type</div>
+              <div><strong>+10</strong> if all selected datasets share the same species</div>
+              <div><strong>+5 each</strong> for shared organelle pairs, capped at <strong>+20</strong></div>
+              <div><strong>+3 each</strong> for shared metric families, capped at <strong>+15</strong></div>
+              <div><strong>+10</strong> if all selected datasets share the same modality family</div>
+              <div><strong>+10</strong> if they share a comparator class</div>
+              <div><strong>+10</strong> if every selected record has metadata completeness of at least 0.8</div>
+              <div>The total is capped at <strong>100</strong>.</div>
+              <div>
+                Current reading bands: <strong>75+</strong> high overlap, <strong>50-74</strong>
+                {" "}moderate overlap, and <strong>below 50</strong> analog-level comparison.
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="panel">
-          <h2 className="section-title">Small Amount of Ethos</h2>
-          <div style={{ display: "grid", gap: 14 }}>
+          <h2 className="section-title">Metadata Completeness</h2>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
+            This measures how fully a record reports standardized fields such as modality,
+            resolution, sample size, and curation status. It is not a scientific-quality score.
+          </p>
+        </section>
+      </section>
+
+      <section className="panel-grid two" style={{ marginTop: 32 }}>
+        <section className="panel">
+          <h2 className="section-title">Public Data Status</h2>
+          <div style={{ display: "grid", gap: 12 }}>
             <p className="muted" style={{ margin: 0 }}>
-              Scion favors provenance and comparability over flashy abstraction.
+              <strong>None</strong>: no reusable public data source is known from the current corpus
+              materials.
             </p>
             <p className="muted" style={{ margin: 0 }}>
-              That means the product tries to make records legible and traceable, not magically more
-              certain than the literature actually is.
+              <strong>Partial</strong>: some public underlying data or assets are available, but not
+              necessarily the full dataset.
             </p>
             <p className="muted" style={{ margin: 0 }}>
-              When a record matters, the publication is still the final authority.
+              <strong>Complete</strong>: reusable public data is known to exist for the dataset in a
+              stronger form.
             </p>
           </div>
+        </section>
+
+        <section className="panel">
+          <h2 className="section-title">Included vs Borderline</h2>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
+            Included records met the primary corpus criteria. Borderline records are still useful,
+            but they usually have a methodological, reporting, or whole-cell-coverage caveat that
+            should remain visible.
+          </p>
         </section>
       </section>
 
       <section className="panel" style={{ marginTop: 32 }}>
-        <h2 className="section-title">What Each Screen Is For</h2>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: 16
-          }}
-        >
-          {screens.map((screen) => (
-            <section key={screen.title} className="panel" style={{ background: "var(--background)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-                <h3 style={{ margin: 0 }}>{screen.title}</h3>
-                <Link href={screen.href} className="muted" style={{ textDecoration: "underline", fontSize: "0.85rem" }}>
-                  Open
-                </Link>
-              </div>
-              <p className="muted" style={{ margin: "14px 0 0", lineHeight: 1.6 }}>
-                {screen.copy}
-              </p>
-            </section>
+        <h2 className="section-title">Badge Legend</h2>
+        <div style={{ display: "grid", gap: 12 }}>
+          {badges.map((badge) => (
+            <div
+              key={badge.label}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "120px 1fr",
+                gap: 12,
+                alignItems: "center"
+              }}
+            >
+              <span className={badge.className} style={{ textAlign: "center", width: "100%" }}>
+                {badge.label}
+              </span>
+              <span className="muted" style={{ fontSize: "0.95rem" }}>
+                {badge.copy}
+              </span>
+            </div>
           ))}
         </div>
       </section>
 
       <section className="panel-grid two" style={{ marginTop: 32 }}>
         <section className="panel">
-          <h2 className="section-title">Things That Actually Matter</h2>
-          <div style={{ display: "grid", gap: 16 }}>
-            <div>
-              <strong>Included vs. Borderline</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                Included records met the primary corpus criteria. Borderline records are still useful,
-                but they need more caution.
-              </p>
-            </div>
-            <div>
-              <strong>Public data status</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                This tells you whether reusable public data is known to exist. It does not mean the
-                data is already mirrored or equally easy to reuse.
-              </p>
-            </div>
-            <div>
-              <strong>Metadata quality</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                This is a reporting-completeness score, not a scientific-quality score.
-              </p>
-            </div>
-            <div>
-              <strong>Missing values</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                Usually a reporting or extraction gap, not proof that the study lacked that feature.
-              </p>
-            </div>
-          </div>
+          <h2 className="section-title">Compare Workflow</h2>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
+            The current compare workflow starts from the corpus. Add two or more datasets from the
+            table or card view, then use the compare drawer or Compare link. The empty compare page
+            is just a destination, not where selection begins.
+          </p>
         </section>
 
         <section className="panel">
-          <h2 className="section-title">Badge Legend</h2>
-          <div style={{ display: "grid", gap: 12 }}>
-            {badges.map((badge) => (
-              <div
-                key={badge.label}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "120px 1fr",
-                  gap: 12,
-                  alignItems: "center"
-                }}
-              >
-                <span className={badge.className} style={{ textAlign: "center", width: "100%" }}>
-                  {badge.label}
-                </span>
-                <span className="muted" style={{ fontSize: "0.95rem" }}>
-                  {badge.copy}
-                </span>
-              </div>
-            ))}
+          <h2 className="section-title">Best Next Step</h2>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
+              Open the Corpus
+            </Link>
+            <Link href="/about" className="button" style={{ textDecoration: "none" }}>
+              Open About
+            </Link>
           </div>
         </section>
       </section>
-
-      <section className="panel-grid two" style={{ marginTop: 32 }}>
-        <section className="panel">
-          <h2 className="section-title">Most Useful Tips</h2>
-          <div style={{ display: "grid", gap: 16 }}>
-            <div>
-              <strong>Table first, cards second</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                Table view is better for scanning quickly. Card view is better when you want more
-                context or want to add datasets to compare.
-              </p>
-            </div>
-            <div>
-              <strong>Compare starts in card view</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                The compare toggle lives on the cards. Select records there, then use the compare
-                drawer at the bottom.
-              </p>
-            </div>
-            <div>
-              <strong>Use Analytics after you have a question</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                Analytics is best when you already know what kind of gap, tradeoff, or coverage
-                pattern you are looking for.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2 className="section-title">Interpretation Warnings</h2>
-          <div style={{ display: "grid", gap: 16 }}>
-            <div>
-              <strong>Compare is a ranking aid</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                A high compare score means “look here first,” not “these studies are equivalent.”
-              </p>
-            </div>
-            <div>
-              <strong>Planner is a benchmarker</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                It tells you what the atlas suggests, not what biology guarantees.
-              </p>
-            </div>
-            <div>
-              <strong>The source publication still matters</strong>
-              <p className="muted" style={{ margin: "8px 0 0" }}>
-                When a record affects a real decision, read the paper.
-              </p>
-            </div>
-          </div>
-        </section>
-      </section>
-
-      <div style={{ marginTop: 40, display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
-        <Link href="/" className="button" style={{ textDecoration: "none" }}>
-          Open the Corpus
-        </Link>
-        <Link href="/analytics" className="button" style={{ textDecoration: "none" }}>
-          Open Analytics
-        </Link>
-      </div>
     </main>
   );
 }

@@ -26,7 +26,7 @@ export default async function DatasetPage({
     return (
       <main>
         <div style={{ marginBottom: 24 }}>
-          <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+          <Link href="/corpus" className="muted" style={{ textDecoration: "underline" }}>
             ← Back to corpus
           </Link>
         </div>
@@ -40,7 +40,7 @@ export default async function DatasetPage({
           error={error}
           context={`dataset ${id}`}
           page="dataset-detail"
-          actionHref="/"
+          actionHref="/corpus"
           actionLabel="Return to corpus"
         />
       </main>
@@ -59,7 +59,7 @@ export default async function DatasetPage({
   return (
     <main>
       <div style={{ marginBottom: 24 }}>
-        <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+        <Link href="/corpus" className="muted" style={{ textDecoration: "underline" }}>
           ← Back to corpus
         </Link>
       </div>
@@ -78,7 +78,7 @@ export default async function DatasetPage({
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
-              href={`/?cell_type=${encodeURIComponent(dataset.cell_type)}`}
+              href={`/corpus?cell_type=${encodeURIComponent(dataset.cell_type)}`}
               className="pill pill-link"
               style={{ fontSize: "0.8rem", textDecoration: "none" }}
             >
@@ -206,14 +206,14 @@ export default async function DatasetPage({
               title="Targeted Contacts"
               items={dataset.organelle_pairs.map((p) => ({
                 label: p,
-                href: `/?pair=${encodeURIComponent(p)}`
+                href: `/corpus?pair=${encodeURIComponent(p)}`
               }))}
             />
           )}
           <section className="panel">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <h2 className="section-title">Metadata Quality</h2>
-              <Link href="/guide" className="muted" style={{ fontSize: "0.75rem", textDecoration: "underline" }}>How is this calculated?</Link>
+              <h2 className="section-title">Metadata Completeness</h2>
+              <Link href="/guide" className="muted" style={{ fontSize: "0.75rem", textDecoration: "underline" }}>How It&apos;s Derived</Link>
             </div>
             <div style={{ fontSize: "2.5rem", fontWeight: 300 }}>
               {Math.round(dataset.metadata_completeness_score * 100)}%

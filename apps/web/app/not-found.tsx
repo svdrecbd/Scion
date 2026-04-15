@@ -15,7 +15,7 @@ export default function NotFoundPage() {
         <p className="muted" style={{ marginTop: 0 }}>
           Return to the corpus and reselect the record from a live search result.
         </p>
-        <Link href="/" className="button" style={{ textDecoration: "none", display: "inline-block" }}>
+        <Link href="/corpus" className="button" style={{ textDecoration: "none", display: "inline-block" }}>
           Back to corpus
         </Link>
       </section>

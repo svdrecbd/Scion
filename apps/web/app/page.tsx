@@ -1,231 +1,190 @@
 import Link from "next/link";
-import { ApiFailurePanel } from "../components/api-failure-panel";
-import { DegradedStatusBanner } from "../components/degraded-status-banner";
-import { DatasetCard } from "../components/dataset-card";
-import { FacetBar } from "../components/facet-bar";
-import { getCompare, getDatasets, pickExampleCompareIds } from "../lib/api";
-import { CompareSummary } from "../components/compare-summary";
-import { ResultSummary } from "../components/result-summary";
+import { redirect } from "next/navigation";
 import { normalizeSearchParams, type RouteSearchParams } from "../lib/route-props";
-import type { CompareResponse, SearchResponse } from "../lib/types";
 
-export default async function HomePage({
+const capabilityCards = [
+  {
+    title: "Find precedent",
+    copy: "Search for where a cell type, organelle, modality, or technical range already appears in the literature."
+  },
+  {
+    title: "Compare records",
+    copy: "Line up candidate datasets and see where they genuinely overlap versus where the comparison gets weak."
+  },
+  {
+    title: "Map the field",
+    copy: "Use analytics to see crowded areas, sparse areas, and where public data is still rare."
+  },
+  {
+    title: "Benchmark a plan",
+    copy: "Check whether a proposed target, voxel size, and sample size look well-precedented or frontier."
+  }
+];
+
+const screenCards = [
+  {
+    title: "Corpus",
+    href: "/corpus",
+    copy: "The working surface. Search, filter, scan records quickly, and build a compare set."
+  },
+  {
+    title: "Compare",
+    href: "/compare",
+    copy: "Use after you have candidate datasets and want to inspect where they align or diverge."
+  },
+  {
+    title: "Analytics",
+    href: "/analytics",
+    copy: "Use for field-level patterns: coverage, tradeoffs, benchmarks, and reporting gaps."
+  },
+  {
+    title: "Plan",
+    href: "/plan",
+    copy: "Use to benchmark a proposed experiment against what the corpus already contains."
+  }
+];
+
+export default async function LandingPage({
   searchParams
 }: {
   searchParams: Promise<RouteSearchParams>;
 }) {
   const resolvedSearchParams = normalizeSearchParams(await searchParams);
-  let searchResponse: SearchResponse;
+  const params = new URLSearchParams();
 
-  try {
-    searchResponse = await getDatasets(resolvedSearchParams);
-  } catch (error) {
-    return (
-      <main>
-        <section className="hero" style={{ marginBottom: 48 }}>
-          <h1>Search the Corpus for Cross-Study Commonalities.</h1>
-          <p>
-            The corpus view is still available, but the backend did not return search results for
-            this request.
-          </p>
-        </section>
-        <ApiFailurePanel
-          error={error}
-          context="corpus search"
-          page="home"
-          actionHref="/"
-          actionLabel="Return to corpus root"
-        />
-      </main>
-    );
-  }
-
-  const exampleIds = pickExampleCompareIds(searchResponse);
-  let comparePayload: CompareResponse | null = null;
-  let compareError: unknown = null;
-
-  if (exampleIds.length >= 2) {
-    try {
-      comparePayload = await getCompare(exampleIds);
-    } catch (error) {
-      compareError = error;
+  Object.entries(resolvedSearchParams).forEach(([key, value]) => {
+    if (value) {
+      params.set(key, value);
     }
+  });
+
+  if (params.size > 0) {
+    redirect(`/corpus?${params.toString()}`);
   }
-
-  const isTable = resolvedSearchParams.view !== "cards";
-
-  // Helper to keep filters when clicking other facets
-  const getFilterUrl = (newParams: Record<string, string | null>, base = "/") => {
-    const params = new URLSearchParams();
-    // Preserve current filters
-    if (resolvedSearchParams.public === "true") params.set("public", "true");
-    if (resolvedSearchParams.borderline === "true") params.set("borderline", "true");
-    if (resolvedSearchParams.query) params.set("query", resolvedSearchParams.query);
-    if (resolvedSearchParams.family) params.set("family", resolvedSearchParams.family);
-    if (resolvedSearchParams.organelle) params.set("organelle", resolvedSearchParams.organelle);
-    if (resolvedSearchParams.modality) params.set("modality", resolvedSearchParams.modality);
-    if (resolvedSearchParams.pair) params.set("pair", resolvedSearchParams.pair);
-    if (resolvedSearchParams.view) params.set("view", resolvedSearchParams.view);
-    
-    // Apply new filters
-    Object.entries(newParams).forEach(([key, value]) => {
-      if (value === null) params.delete(key);
-      else params.set(key, value);
-    });
-    
-    const qs = params.toString();
-    return `${base}${qs ? `?${qs}` : ""}`;
-  };
-
-  const exportCsvUrl = getFilterUrl({ format: "csv" }, "/api/datasets/export");
-  const exportJsonUrl = getFilterUrl({ format: "json" }, "/api/datasets/export");
-  const exportBibtexUrl = getFilterUrl({ format: "bibtex" }, "/api/datasets/export");
 
   return (
     <main>
-      <section className="hero" style={{ marginBottom: 48 }}>
-        <h1>Search the Corpus for Cross-Study Commonalities.</h1>
+      <section className="hero" style={{ marginBottom: 36 }}>
+        <div className="kicker">Whole-Cell Imaging Atlas</div>
+        <h1>Find Precedent, Compare Datasets, and Map the Structure of the Field.</h1>
+        <p>
+          Scion is a structured lookup and comparison layer for whole-cell imaging studies. It is
+          meant to help you find relevant records fast, understand how they were reported, and see
+          where the literature is strong, thin, or hard to compare directly.
+        </p>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+          <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
+            Open the Corpus
+          </Link>
+          <Link href="/analytics" className="button" style={{ textDecoration: "none" }}>
+            Open Analytics
+          </Link>
+          <Link href="/about" className="button" style={{ textDecoration: "none" }}>
+            About the Corpus
+          </Link>
+        </div>
       </section>
 
-      {compareError ? (
-        <DegradedStatusBanner
-          page="home"
-          title="Search View Degraded"
-          issues={[
-            {
-              label: "Compare preview",
-              context: "the example comparison panel",
-              error: compareError
-            }
-          ]}
-        />
-      ) : null}
+      <section className="panel" style={{ marginTop: 32 }}>
+        <div className="kicker" style={{ margin: 0 }}>What Scion helps you do</div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 16,
+            marginTop: 18
+          }}
+        >
+          {capabilityCards.map((item) => (
+            <section key={item.title} className="panel" style={{ background: "var(--background)" }}>
+              <h2 className="section-title">{item.title}</h2>
+              <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
+                {item.copy}
+              </p>
+            </section>
+          ))}
+        </div>
+      </section>
 
-      <section className="panel-grid two" style={{ marginBottom: 20 }}>
+      <section className="panel-grid two" style={{ marginTop: 32 }}>
         <section className="panel">
-          <h2 className="section-title">Workflow</h2>
-          <div className="pill-row">
-            {["search", "match", "compare", "cite"].map((item) => (
-              <span key={item} className="pill">
-                {item}
-              </span>
-            ))}
+          <h2 className="section-title">Best Way to Start</h2>
+          <ol style={{ margin: 0, paddingLeft: 20, display: "grid", gap: 12 }}>
+            <li>Open the corpus and search for a cell type, organelle, or modality family.</li>
+            <li>Use table view to scan quickly, then open records that look promising.</li>
+            <li>Build a compare set from the table or card view once you have promising records.</li>
+            <li>Use Analytics or Plan once your question becomes field-level instead of record-level.</li>
+          </ol>
+        </section>
+
+        <section className="panel">
+          <h2 className="section-title">What Matters Most</h2>
+          <div style={{ display: "grid", gap: 14 }}>
+            <p className="muted" style={{ margin: 0 }}>
+              <strong>Included vs Borderline</strong>: borderline records can still be useful, but
+              they require more caution.
+            </p>
+            <p className="muted" style={{ margin: 0 }}>
+              <strong>Public Data Status</strong>: tells you whether reusable data is known to
+              exist, not whether Scion already mirrors it.
+            </p>
+            <p className="muted" style={{ margin: 0 }}>
+              <strong>Metadata Completeness</strong>: measures reporting completeness, not
+              scientific merit.
+            </p>
           </div>
-          <p className="muted">
-            The result page should tell a researcher what relevant evidence exists, what
-            commonalities recur, and which datasets are strong candidates for comparison.
+        </section>
+      </section>
+
+      <section className="panel" style={{ marginTop: 32 }}>
+        <h2 className="section-title">What Each Screen Is For</h2>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 16
+          }}
+        >
+          {screenCards.map((screen) => (
+            <section key={screen.title} className="panel" style={{ background: "var(--background)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+                <h3 style={{ margin: 0 }}>{screen.title}</h3>
+                <Link
+                  href={screen.href}
+                  className="muted"
+                  style={{ textDecoration: "underline", fontSize: "0.85rem" }}
+                >
+                  Open
+                </Link>
+              </div>
+              <p className="muted" style={{ margin: "14px 0 0", lineHeight: 1.6 }}>
+                {screen.copy}
+              </p>
+            </section>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel-grid two" style={{ marginTop: 32 }}>
+        <section className="panel">
+          <h2 className="section-title">Interpretation Warning</h2>
+          <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
+            Scion is designed to help you find and compare records faster. It is not meant to make
+            the literature seem more certain than it is. When a record matters, read the paper.
           </p>
         </section>
 
-        <FacetBar
-          title="Commonality snapshot"
-          items={[
-            { 
-              label: `datasets: ${searchResponse.total}`, 
-              href: getFilterUrl({ organelle: null, modality: null, family: null, pair: null, query: null }) 
-            },
-            ...searchResponse.commonalities.top_organelles.slice(0, 2).map((o) => ({
-              label: `organelle: ${o}`,
-              href: getFilterUrl({ organelle: o })
-            })),
-            ...searchResponse.commonalities.top_modalities.slice(0, 2).map((m) => ({
-              label: `modality: ${m}`,
-              href: getFilterUrl({ family: m })
-            }))
-          ]}
-        />
-      </section>
-
-      <section className="panel" style={{ marginBottom: 20 }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: "12px" }}>
-          <h2 className="section-title" style={{ margin: 0 }}>
-            {searchResponse.total} {searchResponse.total === 1 ? "result" : "results"}
-            {resolvedSearchParams.query && ` for "${resolvedSearchParams.query}"`}
-            {resolvedSearchParams.organelle && ` filtered by organelle: ${resolvedSearchParams.organelle}`}
-            {resolvedSearchParams.modality && ` filtered by modality: ${resolvedSearchParams.modality}`}
-            {resolvedSearchParams.family && ` filtered by family: ${resolvedSearchParams.family}`}
-            {resolvedSearchParams.pair && ` filtered by pair: ${resolvedSearchParams.pair}`}
-            {resolvedSearchParams.public === "true" && " (Public Data Only)"}
-            {resolvedSearchParams.borderline === "true" && " (Including Borderline)"}
-          </h2>
-          
-          <div style={{ marginLeft: "auto", display: "flex", gap: "16px", alignItems: "baseline" }}>
-            <div style={{ display: "flex", gap: "8px", marginRight: "16px" }}>
-              <Link href={getFilterUrl({ view: "cards" })} className={`pill ${!isTable ? "selected" : ""}`} style={{ fontSize: "0.8rem", padding: "2px 8px" }}>Cards</Link>
-              <Link href={getFilterUrl({ view: "table" })} className={`pill ${isTable ? "selected" : ""}`} style={{ fontSize: "0.8rem", padding: "2px 8px" }}>Table</Link>
-            </div>
-
-            <span className="muted" style={{ fontSize: "0.9rem" }}>Export:</span>
-            <a href={exportCsvUrl} className="muted" style={{ fontSize: "0.9rem", textDecoration: "underline" }} download>CSV</a>
-            <a href={exportJsonUrl} className="muted" style={{ fontSize: "0.9rem", textDecoration: "underline" }} download>JSON</a>
-            <a href={exportBibtexUrl} className="muted" style={{ fontSize: "0.9rem", textDecoration: "underline" }} download>BibTeX</a>
-            
-            {Object.keys(resolvedSearchParams).length > 0 && (
-              <Link
-                href="/"
-                className="muted"
-                style={{ fontSize: "0.9rem", textDecoration: "underline", marginLeft: "8px" }}
-              >
-                Clear all
-              </Link>
-            )}
-          </div>
-        </div>
-
-        <ResultSummary response={searchResponse} searchParams={resolvedSearchParams} />
-
-        {isTable ? (
-          <div style={{ overflowX: "auto" }}>
-            <table className="compare-matrix" style={{ background: "var(--background)" }}>
-              <thead>
-                <tr>
-                  <th>Dataset</th>
-                  <th>Cell Type</th>
-                  <th>Modality</th>
-                  <th>Res (nm)</th>
-                  <th>Sample</th>
-                  <th>Public</th>
-                </tr>
-              </thead>
-              <tbody>
-                {searchResponse.results.map((d) => (
-                  <tr key={d.dataset_id}>
-                    <td>
-                      <Link href={`/datasets/${d.dataset_id}`} style={{ fontWeight: 500, textDecoration: "underline" }}>{d.title}</Link>
-                      <div className="muted" style={{ fontSize: "0.8rem" }}>{d.source}, {d.year}</div>
-                    </td>
-                    <td>{d.cell_type}</td>
-                    <td>{d.modality}</td>
-                    <td>{d.lateral_resolution_nm} x {d.axial_resolution_nm}</td>
-                    <td>{d.sample_size}</td>
-                    <td>{d.public_data_status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="dataset-grid">
-            {searchResponse.results.map((dataset) => (
-              <DatasetCard key={dataset.dataset_id} dataset={dataset} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      {comparePayload ? (
-        <CompareSummary payload={comparePayload} />
-      ) : compareError ? (
-        <section style={{ marginTop: 24 }}>
-          <ApiFailurePanel
-            error={compareError}
-            context="the example comparison panel"
-            page="home"
-            title="Compare preview unavailable"
-            compact
-          />
+        <section className="panel">
+          <h2 className="section-title">Need More Context?</h2>
+          <p className="muted" style={{ margin: "0 0 16px", lineHeight: 1.7 }}>
+            The about page holds the project context, source links, and the scoping-review
+            backbone that Scion is built from.
+          </p>
+          <Link href="/about" className="muted" style={{ textDecoration: "underline" }}>
+            Open About
+          </Link>
         </section>
-      ) : null}
+      </section>
     </main>
   );
 }

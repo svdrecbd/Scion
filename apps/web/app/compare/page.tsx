@@ -16,13 +16,24 @@ export default async function ComparePage({
     return (
       <main>
         <div style={{ marginBottom: 24 }}>
-          <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+          <Link href="/corpus" className="muted" style={{ textDecoration: "underline" }}>
             ← Back to corpus
           </Link>
         </div>
         <section className="hero">
           <h1>Compare Mode</h1>
-          <p>Please select at least two datasets from the corpus to compare them side-by-side.</p>
+          <p>
+            Compare starts in the corpus. Select two or more datasets from either the table or card
+            view, then return here to inspect where they align and where they do not.
+          </p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+            <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
+              Open corpus
+            </Link>
+            <Link href="/guide" className="button" style={{ textDecoration: "none" }}>
+              Compare guide
+            </Link>
+          </div>
         </section>
       </main>
     );
@@ -36,7 +47,7 @@ export default async function ComparePage({
     return (
       <main>
         <div style={{ marginBottom: 24 }}>
-          <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+          <Link href="/corpus" className="muted" style={{ textDecoration: "underline" }}>
             ← Back to corpus
           </Link>
         </div>
@@ -53,8 +64,8 @@ export default async function ComparePage({
           error={error}
           context="the compare view"
           page="compare"
-          actionHref={`/?ids=${encodeURIComponent(ids.join(","))}`}
-          actionLabel="Back to selected datasets"
+          actionHref="/corpus"
+          actionLabel="Back to corpus selection"
         />
       </main>
     );
@@ -63,7 +74,7 @@ export default async function ComparePage({
   return (
     <main>
       <div style={{ marginBottom: 24 }}>
-        <Link href="/" className="muted" style={{ textDecoration: "underline" }}>
+        <Link href="/corpus" className="muted" style={{ textDecoration: "underline" }}>
           ← Back to corpus
         </Link>
       </div>
