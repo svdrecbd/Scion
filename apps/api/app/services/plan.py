@@ -39,16 +39,16 @@ def analyze_experiment_plan(
     status: FeasibilityStatus = "feasible"
     if not bio_matches:
         status = "frontier"
-        msg = "No studies in the corpus have imaged this biological target. This would be a novel contribution."
+        msg = "No records in the current corpus capture this organelle target."
     elif not strict_matches:
         status = "high-risk"
-        msg = f"While {len(bio_matches)} studies exist for these organelles, none have achieved your specific combination of resolution and sample size. This plan pushes current technical limits."
+        msg = f"{len(bio_matches)} matching records exist in the current corpus, but none meet the current resolution and whole-cell count thresholds."
     elif len(strict_matches) < 3:
         status = "challenging"
-        msg = f"Only {len(strict_matches)} studies have achieved similar technical specs for this target. This experiment is at the edge of common practice."
+        msg = f"Only {len(strict_matches)} records in the current corpus meet the current thresholds for this target."
     else:
         status = "feasible"
-        msg = f"{len(strict_matches)} studies have successfully achieved or exceeded these specs. This is a well-precedented experiment plan."
+        msg = f"{len(strict_matches)} records in the current corpus meet the current thresholds for this target."
 
     # 4. Modality Triage
     modality_counts = {}
@@ -71,7 +71,7 @@ def analyze_experiment_plan(
         target_sample_size=target_ss,
         status=status,
         status_message=msg,
-        modality_recommendation=f"Based on {len(bio_matches)} studies, {top_modality} is the most common approach for this target.",
+        modality_recommendation=f"In the current corpus, {top_modality} is the most common modality for this target ({len(bio_matches)} matching records).",
         precedents=strict_matches or bio_matches[:10],
         standard_metrics=sorted_metrics[:3],
         suggested_baselines=[d for d in bio_matches if d.public_data_status != 'none'][:3]

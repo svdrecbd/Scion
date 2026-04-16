@@ -36,7 +36,7 @@ export function DatasetCard({ dataset }: Props) {
             {dataset.whole_cell_boundary_confirmed === "yes" && (
               <span className="pill badge-verify" title="Whole-cell boundary confirmed">Boundary</span>
             )}
-            {isPublic && <span className="pill badge-public" title="Public data available">Data</span>}
+            {isPublic && <span className="pill badge-public" title="Public data available">Public Data</span>}
           </div>
           
           <div>
@@ -54,7 +54,7 @@ export function DatasetCard({ dataset }: Props) {
 
       <div style={{ marginTop: "auto", paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div className="stat-row" style={{ margin: 0, fontSize: "0.85rem" }}>
-          <span>Score: {Math.round(dataset.metadata_completeness_score * 100)}%</span>
+          <span>Metadata: {Math.round(dataset.metadata_completeness_score * 100)}%</span>
         </div>
         
         <div style={{ display: "flex", gap: "8px" }}>

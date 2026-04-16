@@ -13,8 +13,10 @@ export default async function AnalyticsPage({
   searchParams: Promise<RouteSearchParams>;
 }) {
   const resolvedSearchParams = normalizeSearchParams(await searchParams);
-  const rowDim = resolvedSearchParams.row || "cell_type";
-  const colDim = resolvedSearchParams.col || "public_data_status";
+  const allowedRowDims = new Set(["cell_type", "modality", "comparator_class"]);
+  const allowedColDims = new Set(["public_data_status", "modality_family", "sample_size_bucket"]);
+  const rowDim = allowedRowDims.has(resolvedSearchParams.row || "") ? resolvedSearchParams.row! : "cell_type";
+  const colDim = allowedColDims.has(resolvedSearchParams.col || "") ? resolvedSearchParams.col! : "public_data_status";
 
   const [dataResult, benchmarksResult, toolkitResult, frontierResult] = await Promise.allSettled([
     getAnalyticsCrossTab(rowDim, colDim, resolvedSearchParams),
@@ -74,10 +76,11 @@ export default async function AnalyticsPage({
   return (
     <main>
       <section className="hero">
-        <div className="kicker">Scion Analytics</div>
-        <h1>Corpus Trends & Gaps</h1>
+        <div className="kicker">Analytics</div>
+        <h1>Corpus Patterns and Reporting Gaps</h1>
         <p>
-          Synthesize technical performance and identify research white-space across the whole-cell imaging landscape.
+          Use the current corpus to inspect technical tradeoffs, common reporting patterns, and
+          areas that still look thin or unevenly covered.
         </p>
       </section>
 
@@ -102,7 +105,9 @@ export default async function AnalyticsPage({
       {/* Frontier Plot: Resolution vs Sample Size */}
       <div className="panel" style={{ marginTop: 32 }}>
         <h2 className="section-title">The Imaging Frontier</h2>
-        <p className="muted" style={{ marginBottom: 32 }}>The trade-off between spatial resolution and statistical power (sample size).</p>
+        <p className="muted" style={{ marginBottom: 32 }}>
+          Resolution versus per-dataset sample size across the current corpus.
+        </p>
         {frontier ? (
           <FrontierPlot data={frontier} />
         ) : (
@@ -119,40 +124,38 @@ export default async function AnalyticsPage({
       {/* Toolkit Matrix: Organelle vs Modality */}
       <div className="panel" style={{ marginTop: 32 }}>
         <h2 className="section-title">The Imaging Toolkit</h2>
-        <p className="muted" style={{ marginBottom: 32 }}>Which modalities are most effective for specific biological targets?</p>
+        <p className="muted" style={{ marginBottom: 32 }}>
+          Which modalities are most commonly used for different biological targets in this corpus.
+          Organelle names follow the source corpus terminology, including niche structures.
+        </p>
         {toolkit ? (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <div className="analytics-table-wrap">
+            <table className="analytics-matrix analytics-matrix-compact">
               <thead>
                 <tr>
-                  <th style={{ textAlign: "left", padding: "12px", borderBottom: "1px solid var(--border)" }}>Organelle</th>
+                  <th>Organelle</th>
                   {toolkit.modalities.map((m: string) => (
-                    <th key={m} style={{ padding: "12px", borderBottom: "1px solid var(--border)", textAlign: "center" }}>{m}</th>
+                    <th key={m} style={{ textAlign: "center" }}>{m}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {toolkit.organelles.map((organelle: string) => (
                   <tr key={organelle}>
-                    <td style={{ padding: "12px", borderBottom: "1px solid var(--border)", fontWeight: 500 }}>{organelle}</td>
+                    <td className="analytics-matrix-label">{organelle}</td>
                     {toolkit.modalities.map((modality: string) => {
                       const count = toolkit.matrix[organelle]?.[modality] || 0;
                       const size = Math.min(32, 4 + count * 4);
                       return (
-                        <td key={modality} style={{ padding: "12px", borderBottom: "1px solid var(--border)", textAlign: "center", verticalAlign: "middle" }}>
+                        <td key={modality} className="analytics-matrix-cell">
                           {count > 0 ? (
                             <Link 
                               href={`/corpus?organelle=${encodeURIComponent(organelle)}&family=${encodeURIComponent(modality)}`}
                               title={`${count} datasets`}
-                              style={{ 
-                                display: "block",
-                                width: `${size}px`, 
-                                height: `${size}px`, 
-                                background: "var(--foreground)", 
-                                borderRadius: 0, 
-                                margin: "0 auto",
-                                opacity: 0.1 + (count / 20) * 0.9,
-                                transition: "transform 0.2s"
+                              style={{
+                                width: `${size}px`,
+                                height: `${size}px`,
+                                opacity: 0.1 + (count / 20) * 0.9
                               }}
                               className="toolkit-dot"
                             />
@@ -178,7 +181,9 @@ export default async function AnalyticsPage({
 
       <div className="panel" style={{ marginTop: 32 }}>
         <h2 className="section-title">Modality Performance Benchmarks</h2>
-        <p className="muted" style={{ marginBottom: 24 }}>Typical resolution and sample sizes achieved across different imaging families.</p>
+        <p className="muted" style={{ marginBottom: 24 }}>
+          Typical reported resolution and sample sizes across different imaging families.
+        </p>
         {benchmarks ? (
           <div style={{ display: "grid", gap: "24px" }}>
             {benchmarks.map((b: any) => (
@@ -243,28 +248,30 @@ export default async function AnalyticsPage({
 
       <div className="panel" style={{ marginTop: 32 }}>
         <h2 className="section-title">Gap Finder</h2>
-        <p className="muted" style={{ marginBottom: 24 }}>Cross-tabulate the corpus to find under-studied areas or reporting failures.</p>
+        <p className="muted" style={{ marginBottom: 24 }}>
+          Cross-tabulate the corpus to find thinly covered areas and reporting patterns.
+        </p>
         
         <Suspense fallback={<div style={{ height: "40px" }} />}>
           <AnalyticsControls rowDim={rowDim} colDim={colDim} />
         </Suspense>
 
         {data ? (
-          <div style={{ overflowX: "auto" }}>
-            <table className="compare-matrix" style={{ borderCollapse: "separate", borderSpacing: "2px" }}>
+          <div className="analytics-table-wrap">
+            <table className="analytics-matrix analytics-gap-matrix">
               <thead>
                 <tr>
-                  <th style={{ background: "transparent" }}></th>
+                  <th></th>
                   {data.cols.map((col: string) => (
-                    <th key={col} style={{ textAlign: "center", minWidth: "100px" }}>{col}</th>
+                    <th key={col} style={{ textAlign: "center" }}>{col}</th>
                   ))}
-                  <th style={{ background: "var(--accent)" }}>Total</th>
+                  <th className="analytics-total-col">Total</th>
                 </tr>
               </thead>
               <tbody>
                 {data.rows.map((row: string) => (
                   <tr key={row}>
-                    <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>{row}</th>
+                    <th className="analytics-matrix-label" style={{ textAlign: "right" }}>{row}</th>
                     {data.cols.map((col: string) => {
                       const count = data.table[row]?.[col] || 0;
                       const heatmapColor = getHeatmapColor(count);
@@ -284,21 +291,16 @@ export default async function AnalyticsPage({
                         <td 
                           key={col} 
                           style={{ 
-                            padding: 0,
-                            border: "none",
-                            background: heatmapColor,
-                            borderRadius: 0
+                            background: heatmapColor
                           }}
+                          className="analytics-gap-cell"
                         >
                           {count > 0 ? (
                             <Link 
                               href={`/corpus?${params.toString()}`}
-                              style={{ 
-                                display: "block",
-                                padding: "16px 8px",
-                                textDecoration: "none",
-                                color: count > 5 ? "var(--background)" : "var(--foreground)",
-                                fontWeight: 600
+                              className="analytics-gap-link"
+                              style={{
+                                color: count > 5 ? "var(--background)" : "var(--foreground)"
                               }}
                             >
                               {count}
@@ -307,7 +309,7 @@ export default async function AnalyticsPage({
                         </td>
                       );
                     })}
-                    <td style={{ textAlign: "center", background: "var(--accent)", fontWeight: 600 }}>
+                    <td className="analytics-total-col" style={{ textAlign: "center" }}>
                       {data.row_totals[row]}
                     </td>
                   </tr>
@@ -327,12 +329,12 @@ export default async function AnalyticsPage({
       </div>
 
       <section className="panel" style={{ marginTop: 24 }}>
-        <h2 className="section-title">How to read this</h2>
+        <h2 className="section-title">How to Read This</h2>
         <p className="muted" style={{ lineHeight: 1.6 }}>
           • <strong>Interactive:</strong> Click any dot or count to see the underlying datasets.<br/>
-          • <strong>Imaging Toolkit:</strong> The size/opacity of squares shows which modality is the "standard" for an organelle.<br/>
-          • <strong>Benchmarks:</strong> Establish what is technically "standard" for a modality family.<br/>
-          • <strong>Gap Finder:</strong> Find biological systems or conditions that lack specific types of evidence.
+          • <strong>Imaging Toolkit:</strong> The size and opacity of squares show which modalities appear most often for a target in the current corpus, not which one is universally best.<br/>
+          • <strong>Benchmarks:</strong> These summarize reported medians and ranges within each modality family.<br/>
+          • <strong>Gap Finder:</strong> Use this to compare cell types, modalities, comparators, public-data status, modality families, and sample-size buckets.
         </p>
       </section>
     </main>

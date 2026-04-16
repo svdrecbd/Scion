@@ -1,6 +1,7 @@
 import React from "react";
 import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
+import { BadgeLegend } from "../../components/badge-legend";
 import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { getDatasets, getExperimentPlan } from "../../lib/api";
 import { DatasetCard } from "../../components/dataset-card";
@@ -61,10 +62,11 @@ export default async function PlanPage({
   return (
     <main>
       <section className="hero">
-        <div className="kicker">Experiment Assistant</div>
-        <h1>Design Your Next Study</h1>
+        <div className="kicker">Planner</div>
+        <h1>Benchmark a Proposed Study</h1>
         <p>
-          Input your biological targets and technical requirements to validate your plan against the current Imaging Frontier.
+          Use the current corpus to benchmark a proposed target, resolution, and whole-cell count
+          against existing precedent. This is a heuristic planning aid, not an experimental design oracle.
         </p>
       </section>
 
@@ -91,7 +93,7 @@ export default async function PlanPage({
           ) : null}
           <form action="/plan" style={{ display: "grid", gap: "24px" }}>
             <div>
-              <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Target Organelles</label>
+              <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Target Organelle</label>
               {commonOrganelles.length > 0 ? (
                 <select name="organelles" className="search-input" style={{ width: "100%" }} required>
                   <option value="">Select an organelle...</option>
@@ -110,23 +112,41 @@ export default async function PlanPage({
                   required
                 />
               )}
-              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>Select the primary structure you intend to quantify.</p>
+              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                Current planner version accepts one organelle at a time and uses organelle matches
+                as the biological filter.
+              </p>
             </div>
 
             <div>
               <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Required Resolution (nm)</label>
               <input type="number" name="res" defaultValue="10" className="search-input" style={{ width: "100%" }} required />
-              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>What is the largest voxel size that still reveals your target?</p>
+              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                Current planner logic treats this as the target lateral resolution threshold.
+              </p>
             </div>
 
             <div>
-              <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Statistical Scope (Cells)</label>
+              <label style={{ display: "block", marginBottom: 8, fontWeight: 500 }}>Statistical Scope (Whole-Cell Count)</label>
               <input type="number" name="ss" defaultValue="10" className="search-input" style={{ width: "100%" }} required />
-              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>How many whole cells do you need for your analysis?</p>
+              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                Current planner logic interprets this as approximate whole-cell count per study, not
+                pooled N across all precedent studies.
+              </p>
             </div>
 
-            <button type="submit" className="button" style={{ marginTop: 12 }}>Analyze Feasibility</button>
+            <button type="submit" className="button" style={{ marginTop: 12 }}>Benchmark This Plan</button>
           </form>
+
+          <section className="panel" style={{ background: "var(--background)", marginTop: 24 }}>
+            <h2 className="section-title">Current Planner Rules</h2>
+            <div className="muted" style={{ display: "grid", gap: 8, lineHeight: 1.6 }}>
+              <div><strong>Frontier</strong>: no record in the corpus captures the requested organelle.</div>
+              <div><strong>High-Risk</strong>: matching organelle records exist, but none meet the current resolution and sample-size thresholds.</div>
+              <div><strong>Challenging</strong>: fewer than three records meet the current thresholds.</div>
+              <div><strong>Feasible</strong>: three or more records meet the current thresholds.</div>
+            </div>
+          </section>
         </section>
       ) : (
         <div style={{ marginTop: 48 }}>
@@ -143,6 +163,10 @@ export default async function PlanPage({
                   <div className="kicker" style={{ color: getStatusColor(analysis.status) }}>{analysis.status.toUpperCase()}</div>
                   <h2 className="section-title">Feasibility Report</h2>
                   <p style={{ fontSize: "1.1rem", lineHeight: 1.6 }}>{analysis.status_message}</p>
+                  <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.6 }}>
+                    This status is based on a simple corpus heuristic: organelle match first, then
+                    whether records reach roughly the requested resolution and whole-cell count.
+                  </p>
                 </section>
 
                 <section className="panel">
@@ -151,8 +175,8 @@ export default async function PlanPage({
                 </section>
 
                 <section className="panel">
-                  <h2 className="section-title">Comparability Benchmarks</h2>
-                  <p className="muted">To align with the existing corpus for <strong>{analysis.biological_target}</strong>, prioritize these metrics:</p>
+                  <h2 className="section-title">Commonly Reported Metrics</h2>
+                  <p className="muted">Across matching records for <strong>{analysis.biological_target}</strong>, these metric families appear most often:</p>
                   <div className="pill-row" style={{ marginTop: 12 }}>
                     {analysis.standard_metrics.map((m: string) => (
                       <span key={m} className="pill">{m}</span>
@@ -162,7 +186,10 @@ export default async function PlanPage({
 
                 <section className="panel">
                   <h2 className="section-title">Full Precedent List</h2>
-                  <p className="muted" style={{ marginBottom: 16 }}>Every dataset in the corpus that informs this feasibility assessment:</p>
+                  <p className="muted" style={{ marginBottom: 16 }}>
+                    The records currently informing this planner result.
+                  </p>
+                  <BadgeLegend title="Card Tag Legend" compact />
                   <div className="dataset-grid">
                     {analysis.precedents.map((p: any) => (
                       <DatasetCard key={p.dataset_id} dataset={p} />
@@ -174,7 +201,7 @@ export default async function PlanPage({
               <aside style={{ display: "grid", gap: 16 }}>
                 <section className="panel">
                   <h2 className="section-title">Baseline Data</h2>
-                  <p className="muted">Download these public datasets for your project:</p>
+                  <p className="muted">These public records may provide reusable baseline data for this target:</p>
                   <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
                     {analysis.suggested_baselines.length > 0 ? (
                       analysis.suggested_baselines.map((b: any) => (
@@ -182,7 +209,7 @@ export default async function PlanPage({
                           <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{b.modality} · {b.cell_type}</div>
                           <div style={{ fontWeight: 500, fontSize: "0.95rem" }}>{b.title}</div>
                           <div className="pill pill-link" style={{ marginTop: 8, textAlign: "center", fontSize: "0.8rem" }}>
-                            View Reusable Data
+                            Open Record
                           </div>
                         </Link>
                       ))

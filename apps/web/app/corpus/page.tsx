@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
+import { BadgeLegend } from "../../components/badge-legend";
 import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { CompareToggle } from "../../components/compare-toggle";
 import { DatasetCard } from "../../components/dataset-card";
@@ -239,6 +240,7 @@ export default async function CorpusPage({
         </div>
 
         <ResultSummary response={searchResponse} searchParams={resolvedSearchParams} />
+        {!isTable ? <BadgeLegend title="Card Tag Legend" compact /> : null}
 
         {isTable ? (
           <div style={{ overflowX: "auto" }}>

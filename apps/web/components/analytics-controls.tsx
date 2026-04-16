@@ -35,9 +35,8 @@ export function AnalyticsControls({ rowDim, colDim }: Props) {
           style={{ padding: "4px 8px" }}
         >
           <option value="cell_type">Cell Type</option>
-          <option value="species">Species</option>
           <option value="modality">Modality</option>
-          <option value="comparator_class">Comparator</option>
+          <option value="comparator_class">Comparator / Condition</option>
         </select>
       </div>
       <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
@@ -51,7 +50,6 @@ export function AnalyticsControls({ rowDim, colDim }: Props) {
           <option value="public_data_status">Public Data Status</option>
           <option value="modality_family">Modality Family</option>
           <option value="sample_size_bucket">Sample Size Bucket</option>
-          <option value="whole_cell_boundary_confirmed">Boundary Confirmed</option>
         </select>
       </div>
       <button type="submit" className="button" style={{ padding: "6px 16px", fontSize: "0.9rem" }}>Update</button>

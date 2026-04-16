@@ -218,6 +218,100 @@ main {
   font-weight: 500;
 }
 
+.analytics-table-wrap {
+  overflow-x: auto;
+}
+
+.analytics-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--background);
+  border: 1px solid var(--border);
+}
+
+.analytics-matrix th,
+.analytics-matrix td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  min-width: 88px;
+}
+
+.analytics-matrix th {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.analytics-matrix tbody tr:last-child td,
+.analytics-matrix tbody tr:last-child th {
+  border-bottom: none;
+}
+
+.analytics-matrix-label {
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.analytics-matrix-cell {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.analytics-matrix-compact th,
+.analytics-matrix-compact td {
+  padding: 10px;
+}
+
+.toolkit-dot {
+  display: block;
+  background: var(--foreground);
+  border-radius: 0;
+  margin: 0 auto;
+  transition: transform 0.2s;
+}
+
+.toolkit-dot:hover {
+  transform: scale(1.08);
+}
+
+.analytics-gap-matrix {
+  border-collapse: separate;
+  border-spacing: 2px;
+  border: none;
+  background: transparent;
+}
+
+.analytics-gap-matrix th,
+.analytics-gap-matrix td {
+  min-width: 72px;
+  padding: 0;
+  border-bottom: none;
+}
+
+.analytics-gap-matrix th {
+  padding: 10px 8px;
+}
+
+.analytics-gap-cell {
+  border-radius: 0;
+}
+
+.analytics-gap-link {
+  display: block;
+  padding: 12px 6px;
+  text-decoration: none;
+  font-weight: 600;
+  text-align: center;
+}
+
+.analytics-total-col {
+  background: var(--accent);
+  font-weight: 600;
+}
+
 @media (prefers-color-scheme: dark) {
   .compare-matrix .match-highlight {
     color: #81c784;
@@ -237,7 +331,7 @@ main {
 .hero h1 {
   font-family: var(--font-display);
   font-size: 2.25rem;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1;
   letter-spacing: -0.03em;
   margin: 0;
@@ -419,7 +513,7 @@ main {
   font-family: var(--font-display);
   margin: 0 0 12px;
   font-size: 1.1rem;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.02em;
 }
 
@@ -442,7 +536,7 @@ main {
 
 .compare-card h3 {
   font-family: var(--font-display);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.02em;
 }
 

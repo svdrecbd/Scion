@@ -8,6 +8,14 @@ import type { DatasetRecord } from "../../../lib/types";
 import { FacetBar } from "../../../components/facet-bar";
 import { CitationButton } from "../../../components/citation-button";
 
+function firstAuthorLabel(datasetId: string) {
+  const slug = datasetId.split("-")[0] || datasetId;
+  return slug
+    .split(/[_\s]+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 export default async function DatasetPage({
   params
 }: {
@@ -74,7 +82,7 @@ export default async function DatasetPage({
         <h1>{dataset.title}</h1>
         <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
           <p className="muted" style={{ margin: 0 }}>
-            Published in <strong>{dataset.paper_title}</strong> ({dataset.year})
+            <strong>{firstAuthorLabel(dataset.dataset_id)} et al., {dataset.year}</strong> · {dataset.source}
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
@@ -137,11 +145,31 @@ export default async function DatasetPage({
                 <div style={{ fontSize: "1.1rem" }}>{dataset.sample_size ?? "Unknown"}</div>
               </div>
               <div>
-                <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Boundary Confirmed</div>
+                <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Whole-Cell Boundary</div>
                 <div style={{ fontSize: "1.1rem" }}>{dataset.whole_cell_boundary_confirmed}</div>
               </div>
             </div>
           </section>
+
+          {(dataset.comparator_class || dataset.comparator_detail) && (
+            <section className="panel">
+              <h2 className="section-title">Comparators / Conditions</h2>
+              <div className="stat-row" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+                {dataset.comparator_class && (
+                  <div>
+                    <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Comparator Class</div>
+                    <div style={{ fontSize: "1.1rem" }}>{dataset.comparator_class}</div>
+                  </div>
+                )}
+                {dataset.comparator_detail && (
+                  <div>
+                    <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Comparator Detail</div>
+                    <div style={{ fontSize: "1.1rem" }}>{dataset.comparator_detail}</div>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
 
           <section className="panel">
             <h2 className="section-title">Provenance</h2>
@@ -172,7 +200,10 @@ export default async function DatasetPage({
         <aside style={{ display: "grid", gap: 16 }}>
           {similar.length > 0 && (
             <section className="panel">
-              <h2 className="section-title">Most Comparable Datasets</h2>
+              <h2 className="section-title">Similar Records</h2>
+              <p className="muted" style={{ margin: "0 0 12px", lineHeight: 1.6 }}>
+                These recommendations are based on shared metadata and biological overlap signals, not a claim of direct equivalence.
+              </p>
               <div style={{ display: "grid", gap: "12px" }}>
                 {similar.map((s) => (
                   <Link key={s.dataset_id} href={`/datasets/${s.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "8px" }}>
@@ -202,13 +233,19 @@ export default async function DatasetPage({
             items={dataset.metric_families}
           />
           {dataset.organelle_pairs.length > 0 && (
-            <FacetBar
-              title="Targeted Contacts"
-              items={dataset.organelle_pairs.map((p) => ({
-                label: p,
-                href: `/corpus?pair=${encodeURIComponent(p)}`
-              }))}
-            />
+            <>
+              <FacetBar
+                title="Captured Organelle Pairs"
+                items={dataset.organelle_pairs.map((p) => ({
+                  label: p,
+                  href: `/corpus?pair=${encodeURIComponent(p)}`
+                }))}
+              />
+              <p className="muted" style={{ margin: "-4px 0 0", fontSize: "0.85rem", lineHeight: 1.5 }}>
+                These pairs are derived from the organelles listed for this record. They should not
+                be read as proof that the study explicitly quantified contact sites.
+              </p>
+            </>
           )}
           <section className="panel">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
