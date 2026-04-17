@@ -39,7 +39,10 @@ class DatasetRecord(BaseModel):
     metadata_completeness_score: float = Field(ge=0.0, le=1.0)
     whole_cell_boundary_confirmed: BoundaryStatus = "unclear"
     notes: str | None = None
+    source_study_id: str | None = None
+    publication_pmid: str | None = None
     source_publication_url: str | None = None
+    public_locator_urls: list[str] = Field(default_factory=list)
     included_status: str = "included"
 
 

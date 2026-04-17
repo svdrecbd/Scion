@@ -9,7 +9,7 @@ const badgeItems = [
   },
   {
     label: "Boundary",
-    description: "Whole-cell boundary status is reported."
+    description: "Whole-cell boundary is confirmed."
   },
   {
     label: "Public Data",

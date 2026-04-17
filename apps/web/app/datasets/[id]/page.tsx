@@ -16,6 +16,10 @@ function firstAuthorLabel(datasetId: string) {
     .join(" ");
 }
 
+function citationLabel(dataset: DatasetRecord) {
+  return dataset.source_study_id || `${firstAuthorLabel(dataset.dataset_id)} ${dataset.year}`;
+}
+
 export default async function DatasetPage({
   params
 }: {
@@ -82,7 +86,7 @@ export default async function DatasetPage({
         <h1>{dataset.title}</h1>
         <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
           <p className="muted" style={{ margin: 0 }}>
-            <strong>{firstAuthorLabel(dataset.dataset_id)} et al., {dataset.year}</strong> · {dataset.source}
+            <strong>{citationLabel(dataset)}</strong> · {dataset.source}
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
@@ -177,6 +181,16 @@ export default async function DatasetPage({
               This record was ingested from the <em>Cell Anatomy Scoping Review</em> corpus.
             </p>
             <div className="stat-row">
+              {dataset.publication_pmid && (
+                <a
+                  href={`https://pubmed.ncbi.nlm.nih.gov/${dataset.publication_pmid}/`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="pill pill-link"
+                >
+                  PMID {dataset.publication_pmid}
+                </a>
+              )}
               {dataset.source_publication_url && (
                 <a
                   href={dataset.source_publication_url}
@@ -194,6 +208,23 @@ export default async function DatasetPage({
                 </div>
               )}
             </div>
+            {(dataset.public_locator_urls?.length ?? 0) > 0 && (
+              <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+                <div className="kicker" style={{ margin: 0 }}>Public Data Links</div>
+                {dataset.public_locator_urls?.map((url) => (
+                  <a
+                    key={url}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="muted"
+                    style={{ textDecoration: "underline", wordBreak: "break-word" }}
+                  >
+                    {url}
+                  </a>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 

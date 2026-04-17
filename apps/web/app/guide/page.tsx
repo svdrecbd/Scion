@@ -18,7 +18,7 @@ const badges = [
     copy: "Whole-cell boundary confirmation is present."
   },
   {
-    label: "Data",
+    label: "Public Data",
     className: "pill badge-public",
     copy: "Reusable public data is known to exist."
   },
@@ -78,6 +78,15 @@ export default function GuidePage() {
             This measures how fully a record reports standardized fields such as modality,
             resolution, sample size, and curation status. It is not a scientific-quality score.
           </p>
+          <div className="muted" style={{ display: "grid", gap: 6, lineHeight: 1.6, marginTop: 14 }}>
+            <div><strong>+20%</strong> identity fields present in the seed record</div>
+            <div><strong>+15%</strong> biological context present</div>
+            <div><strong>+15%</strong> resolution reported, or <strong>+5%</strong> when not reported</div>
+            <div><strong>+20%</strong> organelles captured are listed</div>
+            <div><strong>+10%</strong> metric families are listed</div>
+            <div><strong>+10%</strong> sample size is reported</div>
+            <div><strong>+10%</strong> public data is known, or <strong>+5%</strong> when no public data source is known</div>
+          </div>
         </section>
       </section>
 

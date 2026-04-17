@@ -53,6 +53,8 @@ def test_dataset_detail_and_similar_routes_work_with_seeded_ids(
     assert detail_response.status_code == 200
     detail_payload = detail_response.json()
     assert detail_payload["dataset_id"] == dataset_id
+    assert detail_payload["source_study_id"]
+    assert detail_payload["publication_pmid"]
     assert detail_payload["source_publication_url"]
 
     similar_response = integration_client.get(f"/api/datasets/{dataset_id}/similar")
@@ -85,6 +87,7 @@ def test_compare_and_export_routes_use_seeded_dataset_records(
     export_payload = export_response.json()
     assert export_payload
     assert all(item["public_data_status"] != "none" for item in export_payload)
+    assert any(item["publication_pmid"] for item in export_payload)
 
 
 def test_analytics_routes_use_seeded_postgres_aggregates(
@@ -136,7 +139,25 @@ def test_analytics_routes_use_seeded_postgres_aggregates(
     plan_payload = plan_response.json()
     assert plan_payload["status"] in {"feasible", "challenging", "high-risk", "frontier"}
     assert plan_payload["biological_target"]
+    assert plan_payload["matched_records_count"] >= plan_payload["threshold_records_count"]
     assert "precedents" in plan_payload
+
+    any_threshold_response = integration_client.get(
+        "/api/datasets/analytics/plan",
+        params={"organelles": "nucleus,mitochondria", "metric": "volume"},
+    )
+    assert any_threshold_response.status_code == 200
+    any_threshold_payload = any_threshold_response.json()
+    assert any_threshold_payload["target_res_nm"] is None
+    assert any_threshold_payload["target_sample_size"] is None
+    assert any_threshold_payload["precedents"]
+
+    plan_export_response = integration_client.get(
+        "/api/datasets/analytics/plan/export",
+        params={"organelles": "nucleus,mitochondria", "metric": "volume"},
+    )
+    assert plan_export_response.status_code == 200
+    assert "PMID" in plan_export_response.text
 
 
 def test_cross_tab_rejects_unsupported_dimensions(

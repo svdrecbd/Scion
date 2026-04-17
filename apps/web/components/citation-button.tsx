@@ -7,7 +7,9 @@ export function CitationButton({ dataset }: { dataset: DatasetRecord }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    const citation = `"${dataset.paper_title}." (${dataset.year}). ${dataset.source}. Indexed in Scion.`;
+    const studyLabel = dataset.source_study_id ? `${dataset.source_study_id}. ` : "";
+    const pmid = dataset.publication_pmid ? ` PMID: ${dataset.publication_pmid}.` : "";
+    const citation = `${studyLabel}"${dataset.paper_title}." ${dataset.source}. ${dataset.year}.${pmid} Indexed in Scion.`;
     navigator.clipboard.writeText(citation);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);

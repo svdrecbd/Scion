@@ -312,6 +312,61 @@ main {
   font-weight: 600;
 }
 
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+
+.choice-option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  font-size: 0.9rem;
+}
+
+.plan-criteria-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.precedent-section {
+  grid-column: 1 / -1;
+}
+
+.precedent-header,
+.precedent-controls {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.precedent-controls {
+  margin: 18px 0;
+}
+
+.precedent-controls .search-input {
+  max-width: 280px;
+}
+
+.plan-precedent-table th,
+.plan-precedent-table td {
+  min-width: 130px;
+  vertical-align: top;
+}
+
 @media (prefers-color-scheme: dark) {
   .compare-matrix .match-highlight {
     color: #81c784;

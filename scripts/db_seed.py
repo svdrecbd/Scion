@@ -251,6 +251,7 @@ def build_records() -> list[dict]:
                 "notes": " ".join(note_parts) or None,
                 "included_status": row["included_status"],
                 "source_study_id": row["study_id"],
+                "publication_pmid": study["pmid"].strip() or None,
                 "source_publication_url": publication_url(study["pmid"], row["study_slug"]),
                 "public_locator_urls": [
                     value.strip()
@@ -301,6 +302,7 @@ def main() -> None:
                         notes,
                         included_status,
                         source_study_id,
+                        publication_pmid,
                         source_publication_url,
                         public_locator_urls
                     ) VALUES (
@@ -331,6 +333,7 @@ def main() -> None:
                         %(notes)s,
                         %(included_status)s,
                         %(source_study_id)s,
+                        %(publication_pmid)s,
                         %(source_publication_url)s,
                         %(public_locator_urls)s
                     )

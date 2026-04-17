@@ -63,6 +63,32 @@ def _log_route_timing(operation: str, started_at: float, **context) -> None:
     )
 
 
+def _parse_plan_organelles(organelles: str) -> list[str]:
+    return [organelle.strip() for organelle in organelles.split(",") if organelle.strip()]
+
+
+def _build_plan_analysis(
+    *,
+    repository: DatasetRepository,
+    organelles: str,
+    res: float | None,
+    ss: int | None,
+    cell_type: str | None,
+    metric_family: str | None,
+    comparator_class: str | None,
+    modality_family: str | None,
+) -> tuple[list[str], list[DatasetRecord], PlanAnalysis]:
+    organelle_list = _parse_plan_organelles(organelles)
+    datasets = repository.list_datasets(
+        cell_type=cell_type,
+        metric_family=metric_family,
+        comparator_class=comparator_class,
+        modality_family=modality_family,
+        include_borderline=True,
+    )
+    return organelle_list, datasets, analyze_experiment_plan(datasets, organelle_list, res, ss)
+
+
 @router.get("", response_model=SearchResponse)
 def search_datasets(
     query: str | None = None,
@@ -193,9 +219,11 @@ def export_datasets(
                 slug = d.dataset_id.replace("-", "")
                 entry = f"@article{{{slug},\n"
                 entry += f"  title = {{{d.paper_title}}},\n"
-                entry += f"  author = {{{d.source}}},\n"
+                entry += f"  author = {{{d.source_study_id or d.source}}},\n"
                 entry += f"  journal = {{{d.source}}},\n"
                 entry += f"  year = {{{d.year}}},\n"
+                if d.publication_pmid:
+                    entry += f"  pmid = {{{d.publication_pmid}}},\n"
                 entry += f"  note = {{Indexed in Scion: {d.title}}}\n"
                 entry += "}\n"
                 bib_entries.append(entry)
@@ -224,6 +252,8 @@ def export_datasets(
                 "Dataset ID",
                 "Title",
                 "Paper Title",
+                "Study",
+                "PMID",
                 "Year",
                 "Journal",
                 "Species",
@@ -235,6 +265,8 @@ def export_datasets(
                 "Metrics",
                 "Public Data Status",
                 "Included Status",
+                "Publication URL",
+                "Public Data URLs",
                 "Notes",
             ]
         )
@@ -245,6 +277,8 @@ def export_datasets(
                     d.dataset_id,
                     d.title,
                     d.paper_title,
+                    d.source_study_id or "",
+                    d.publication_pmid or "",
                     d.year,
                     d.source,
                     d.species,
@@ -256,6 +290,8 @@ def export_datasets(
                     "; ".join(d.metric_families),
                     d.public_data_status,
                     d.included_status,
+                    d.source_publication_url or "",
+                    "; ".join(d.public_locator_urls),
                     d.notes or "",
                 ]
             )
@@ -423,22 +459,148 @@ def get_benchmarks(
 @router.get("/analytics/plan", response_model=PlanAnalysis)
 def get_experiment_plan(
     organelles: str = Query(..., description="Comma-separated organelles"),
-    res: float = Query(..., description="Target resolution in nm"),
-    ss: int = Query(..., description="Target sample size in cells"),
+    res: float | None = Query(default=None, description="Target resolution in nm; omit for any"),
+    ss: int | None = Query(default=None, description="Target sample size in cells; omit for any"),
+    cell_type: str | None = None,
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
     repository: DatasetRepository = Depends(get_dataset_repository),
 ) -> PlanAnalysis:
     started_at = perf_counter()
     with _guard_analytics_slot("datasets.analytics.plan"):
-        organelle_list = [o.strip() for o in organelles.split(",") if o.strip()]
-        datasets = repository.list_plan_datasets(organelle_list, include_borderline=True)
-        response = analyze_experiment_plan(datasets, organelle_list, res, ss)
+        organelle_list, datasets, response = _build_plan_analysis(
+            repository=repository,
+            organelles=organelles,
+            res=res,
+            ss=ss,
+            cell_type=cell_type,
+            metric_family=metric_family,
+            comparator_class=comparator_class,
+            modality_family=modality_family,
+        )
         _log_route_timing(
             "datasets.analytics.plan",
             started_at,
             source_count=len(datasets),
             organelle_count=len(organelle_list),
+            cell_type_filter=bool(cell_type),
+            metric_family_filter=bool(metric_family),
+            comparator_class_filter=bool(comparator_class),
+            modality_family_filter=bool(modality_family),
             precedent_count=len(response.precedents),
             baseline_count=len(response.suggested_baselines),
+        )
+        return response
+
+
+@router.get("/analytics/plan/export")
+def export_experiment_plan(
+    organelles: str = Query(..., description="Comma-separated organelles"),
+    res: float | None = Query(default=None, description="Target resolution in nm; omit for any"),
+    ss: int | None = Query(default=None, description="Target sample size in cells; omit for any"),
+    cell_type: str | None = None,
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
+    repository: DatasetRepository = Depends(get_dataset_repository),
+):
+    started_at = perf_counter()
+    settings = get_settings()
+
+    with _guard_export_slot():
+        organelle_list, _, analysis = _build_plan_analysis(
+            repository=repository,
+            organelles=organelles,
+            res=res,
+            ss=ss,
+            cell_type=cell_type,
+            metric_family=metric_family,
+            comparator_class=comparator_class,
+            modality_family=modality_family,
+        )
+
+        if len(analysis.precedents) > settings.export_max_rows:
+            route_logger.warning(
+                "plan export rejected due to safety limit",
+                extra=with_request_context(
+                    {
+                        "event": "route_plan_export_rejected_limit",
+                        "requested_count": len(analysis.precedents),
+                        "row_limit": settings.export_max_rows,
+                    }
+                ),
+            )
+            raise ExportLimitError(
+                f"Export exceeds the {settings.export_max_rows}-row safety limit. Narrow the filters and retry.",
+                row_limit=settings.export_max_rows,
+            )
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "Dataset ID",
+                "Study",
+                "PMID",
+                "Paper Title",
+                "Year",
+                "Journal",
+                "Cell Type",
+                "Species",
+                "Modality",
+                "Modality Family",
+                "Res XY (nm)",
+                "Res Z (nm)",
+                "Sample Size",
+                "Organelles",
+                "Metrics",
+                "Comparator Class",
+                "Comparator Detail",
+                "Public Data Status",
+                "Publication URL",
+            ]
+        )
+        for dataset in analysis.precedents:
+            writer.writerow(
+                [
+                    dataset.dataset_id,
+                    dataset.source_study_id or "",
+                    dataset.publication_pmid or "",
+                    dataset.paper_title,
+                    dataset.year,
+                    dataset.source,
+                    dataset.cell_type,
+                    dataset.species,
+                    dataset.modality,
+                    dataset.modality_family,
+                    dataset.lateral_resolution_nm,
+                    dataset.axial_resolution_nm,
+                    dataset.sample_size,
+                    "; ".join(dataset.organelles),
+                    "; ".join(dataset.metric_families),
+                    dataset.comparator_class or "",
+                    dataset.comparator_detail or "",
+                    dataset.public_data_status,
+                    dataset.source_publication_url or "",
+                ]
+            )
+
+        output.seek(0)
+        response = StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=scion_plan_precedents.csv",
+                "X-Scion-Export-Count": str(len(analysis.precedents)),
+                "X-Scion-Export-Limit": str(settings.export_max_rows),
+            },
+        )
+        _log_route_timing(
+            "datasets.analytics.plan.export",
+            started_at,
+            exported_count=len(analysis.precedents),
+            organelle_count=len(organelle_list),
         )
         return response
 

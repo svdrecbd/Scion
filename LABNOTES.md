@@ -19,6 +19,7 @@ This is the internal working notebook for Scion.
 - Built the **Experiment Assistant**: A feasibility engine that benchmarks new plans against historical data.
 - Added status-based reporting (Feasible / High-Risk) based on physical limits of the frontier.
 - Integrated automated Baseline Data discovery for segmentation training sets.
+- Added multi-organelle planner queries, optional resolution/sample-size thresholds, PMID export, and a table-first precedent view.
 
 ### Phase 4: Scientific Utility & Polish
 - Implemented **Export Engine** (CSV, JSON, and BibTeX).

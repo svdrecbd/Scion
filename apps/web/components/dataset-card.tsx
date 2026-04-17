@@ -23,7 +23,7 @@ export function DatasetCard({ dataset }: Props) {
       <Link href={`/datasets/${dataset.dataset_id}`} className="dataset-card-link" style={{ flex: 1 }}>
         <h3>{dataset.title}</h3>
         <p className="muted" style={{ marginBottom: 16 }}>
-          {dataset.modality} · {dataset.source} · {dataset.year}
+          {dataset.source_study_id || `${dataset.source}, ${dataset.year}`} · {dataset.modality}
         </p>
 
         <div className="panel-grid" style={{ gap: 12, marginBottom: 16 }}>

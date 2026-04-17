@@ -40,7 +40,10 @@ DATASET_SELECT_COLUMNS = """
     metadata_completeness_score,
     whole_cell_boundary_confirmed,
     notes,
+    source_study_id,
+    publication_pmid,
     source_publication_url,
+    public_locator_urls,
     included_status
 """
 
@@ -211,7 +214,10 @@ def _row_to_dataset(row: dict) -> DatasetRecord:
         metadata_completeness_score=row["metadata_completeness_score"],
         whole_cell_boundary_confirmed=row["whole_cell_boundary_confirmed"],
         notes=row["notes"],
+        source_study_id=row["source_study_id"],
+        publication_pmid=row["publication_pmid"],
         source_publication_url=row["source_publication_url"],
+        public_locator_urls=row["public_locator_urls"] or [],
         included_status=row["included_status"],
     )
 
@@ -316,6 +322,8 @@ def _filter_in_memory_datasets(
                 [
                     dataset.title,
                     dataset.paper_title,
+                    dataset.source_study_id or "",
+                    dataset.publication_pmid or "",
                     dataset.source,
                     dataset.species,
                     dataset.cell_type,
@@ -378,6 +386,8 @@ def _build_dataset_filters(
             (
                 title ILIKE %s OR
                 paper_title ILIKE %s OR
+                source_study_id ILIKE %s OR
+                publication_pmid ILIKE %s OR
                 source ILIKE %s OR
                 species ILIKE %s OR
                 cell_type ILIKE %s OR
@@ -386,7 +396,7 @@ def _build_dataset_filters(
             """.strip()
         )
         pattern = f"%{query}%"
-        params.extend([pattern] * 6)
+        params.extend([pattern] * 8)
 
     if cell_type:
         clauses.append("cell_type ILIKE %s")

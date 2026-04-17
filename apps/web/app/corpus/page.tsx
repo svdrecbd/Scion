@@ -270,7 +270,8 @@ export default async function CorpusPage({
                         {d.title}
                       </Link>
                       <div className="muted" style={{ fontSize: "0.8rem" }}>
-                        {d.source}, {d.year}
+                        {d.source_study_id || `${d.source}, ${d.year}`}
+                        {d.publication_pmid ? ` · PMID ${d.publication_pmid}` : ""}
                       </div>
                     </td>
                     <td>{d.cell_type}</td>

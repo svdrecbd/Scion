@@ -36,5 +36,12 @@
   "sample_size_bucket": "11-50",
   "metadata_completeness_score": 0.94,
   "whole_cell_boundary_confirmed": "yes",
-  "notes": "Strong candidate reference set for cross-modality comparison."
+  "notes": "Strong candidate reference set for cross-modality comparison.",
+  "source_study_id": "Example 2024",
+  "publication_pmid": "00000000",
+  "source_publication_url": "https://pubmed.ncbi.nlm.nih.gov/00000000/",
+  "public_locator_urls": [
+    "https://example.org/dataset"
+  ],
+  "included_status": "included"
 }

@@ -4,7 +4,7 @@ export function normalizeSearchParams(searchParams: RouteSearchParams): Record<s
   return Object.fromEntries(
     Object.entries(searchParams).map(([key, value]) => [
       key,
-      Array.isArray(value) ? value[0] : value
+      Array.isArray(value) ? value.filter(Boolean).join(",") : value
     ])
   ) as Record<string, string | undefined>;
 }

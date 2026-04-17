@@ -1,4 +1,4 @@
-import type { CompareResponse, SearchResponse, DatasetRecord } from "./types";
+import type { CompareResponse, FacetResponse, PlanAnalysis, SearchResponse, DatasetRecord } from "./types";
 
 const REQUEST_ID_HEADER = "X-Request-ID";
 const DEFAULT_API_TIMEOUT_MS = 5000;
@@ -187,6 +187,10 @@ export async function getDatasets(searchParams?: {
   return readJsonOrThrow<SearchResponse>(`/datasets${qs}`);
 }
 
+export async function getFacets(): Promise<FacetResponse> {
+  return readJsonOrThrow<FacetResponse>("/datasets/facets");
+}
+
 export async function getAnalyticsCrossTab(row: string, col: string, searchParams?: any): Promise<any> {
   const qs = buildQueryString({ ...searchParams, row, col });
   return readJsonOrThrow<any>(`/datasets/analytics/cross-tab${qs}`);
@@ -202,8 +206,17 @@ export async function getFrontierData(searchParams?: any): Promise<any[]> {
   return readJsonOrThrow<any[]>(`/datasets/analytics/frontier${qs}`);
 }
 
-export async function getExperimentPlan(organelles: string, res: number, ss: number): Promise<any> {
-  return readJsonOrThrow<any>(`/datasets/analytics/plan?organelles=${encodeURIComponent(organelles)}&res=${res}&ss=${ss}`);
+export async function getExperimentPlan(params: {
+  organelles: string;
+  res?: string | number | null;
+  ss?: string | number | null;
+  cell_type?: string | null;
+  metric?: string | null;
+  comparator_class?: string | null;
+  family?: string | null;
+}): Promise<PlanAnalysis> {
+  const qs = buildQueryString(params);
+  return readJsonOrThrow<PlanAnalysis>(`/datasets/analytics/plan${qs}`);
 }
 
 export async function getAnalyticsBenchmarks(): Promise<any[]> {

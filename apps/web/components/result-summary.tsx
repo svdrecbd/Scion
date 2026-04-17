@@ -29,7 +29,7 @@ export function ResultSummary({ response, searchParams }: Props) {
         {topMetric ? <> with <strong>{topMetric}</strong> as the most common metric family.</> : "."}
         {commonalities.top_organelle_pairs.length > 0 && (
           <>
-            {" "}The most common targeted contact is <strong>{commonalities.top_organelle_pairs[0]}</strong>.
+            {" "}The most common captured organelle pair is <strong>{commonalities.top_organelle_pairs[0]}</strong>.
           </>
         )}
       </p>

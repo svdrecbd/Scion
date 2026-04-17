@@ -7,33 +7,43 @@ FeasibilityStatus = Literal["feasible", "challenging", "high-risk", "frontier"]
 
 class PlanAnalysis(BaseModel):
     biological_target: str
-    target_res_nm: float
-    target_sample_size: int
+    target_res_nm: float | None = None
+    target_sample_size: int | None = None
     status: FeasibilityStatus
     status_message: str
     modality_recommendation: str
     precedents: list[DatasetRecord]
     standard_metrics: list[str]
     suggested_baselines: list[DatasetRecord]
+    matched_records_count: int
+    threshold_records_count: int
 
 def analyze_experiment_plan(
     datasets: list[DatasetRecord],
     organelles: list[str],
-    target_res: float,
-    target_ss: int
+    target_res: float | None,
+    target_ss: int | None
 ) -> PlanAnalysis:
-    # 1. Find studies matching at least one organelle
+    # 1. Find studies matching at least one requested organelle.
     bio_matches = [
         d for d in datasets 
         if any(o in d.organelles for o in organelles)
     ]
     
-    # 2. Narrow by resolution and sample size
-    strict_matches = [
-        d for d in bio_matches
-        if (d.lateral_resolution_nm or 999) <= target_res * 1.5
-        and (d.sample_size or 0) >= target_ss * 0.5
-    ]
+    # 2. Narrow by requested thresholds. Missing thresholds mean "any".
+    strict_matches: list[DatasetRecord] = []
+    for dataset in bio_matches:
+        meets_resolution = True
+        meets_sample_size = True
+
+        if target_res is not None:
+            meets_resolution = (dataset.lateral_resolution_nm or 999) <= target_res * 1.5
+
+        if target_ss is not None:
+            meets_sample_size = (dataset.sample_size or 0) >= target_ss * 0.5
+
+        if meets_resolution and meets_sample_size:
+            strict_matches.append(dataset)
     
     # 3. Calculate status
     status: FeasibilityStatus = "feasible"
@@ -42,13 +52,13 @@ def analyze_experiment_plan(
         msg = "No records in the current corpus capture this organelle target."
     elif not strict_matches:
         status = "high-risk"
-        msg = f"{len(bio_matches)} matching records exist in the current corpus, but none meet the current resolution and whole-cell count thresholds."
+        msg = f"{len(bio_matches)} matching records exist in the current corpus, but none meet the active threshold filters."
     elif len(strict_matches) < 3:
         status = "challenging"
-        msg = f"Only {len(strict_matches)} records in the current corpus meet the current thresholds for this target."
+        msg = f"Only {len(strict_matches)} records in the current corpus meet the active threshold filters for this target."
     else:
         status = "feasible"
-        msg = f"{len(strict_matches)} records in the current corpus meet the current thresholds for this target."
+        msg = f"{len(strict_matches)} records in the current corpus meet the active filters for this target."
 
     # 4. Modality Triage
     modality_counts = {}
@@ -72,7 +82,9 @@ def analyze_experiment_plan(
         status=status,
         status_message=msg,
         modality_recommendation=f"In the current corpus, {top_modality} is the most common modality for this target ({len(bio_matches)} matching records).",
-        precedents=strict_matches or bio_matches[:10],
+        precedents=strict_matches or bio_matches,
         standard_metrics=sorted_metrics[:3],
-        suggested_baselines=[d for d in bio_matches if d.public_data_status != 'none'][:3]
+        suggested_baselines=[d for d in bio_matches if d.public_data_status != 'none'][:3],
+        matched_records_count=len(bio_matches),
+        threshold_records_count=len(strict_matches),
     )
