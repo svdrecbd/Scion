@@ -8,6 +8,7 @@ import { CompareDrawer } from "../components/compare-drawer";
 const ebGaramond = EB_Garamond({
   subsets: ["latin"],
   display: "swap",
+  variable: "--font-body",
 });
 
 export const metadata: Metadata = {
@@ -26,7 +27,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={ebGaramond.className}>
+    <html lang="en" className={`${ebGaramond.className} ${ebGaramond.variable}`}>
       <body>
         <CompareProvider>
           <Suspense fallback={<nav className="navbar" />}>

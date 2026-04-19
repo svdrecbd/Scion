@@ -173,6 +173,7 @@ function buildQueryString(params?: Record<string, any>): string {
 
 export async function getDatasets(searchParams?: {
   query?: string;
+  year?: string | number;
   cell_type?: string;
   organelle?: string;
   pair?: string;
@@ -180,8 +181,10 @@ export async function getDatasets(searchParams?: {
   family?: string;
   metric?: string;
   comparator_class?: string;
+  status?: "none" | "partial" | "complete" | string;
   public?: string | boolean;
   borderline?: string | boolean;
+  limit?: string | number;
 }): Promise<SearchResponse> {
   const qs = buildQueryString(searchParams);
   return readJsonOrThrow<SearchResponse>(`/datasets${qs}`);
@@ -199,6 +202,26 @@ export async function getAnalyticsCrossTab(row: string, col: string, searchParam
 export async function getToolkitMatrix(searchParams?: any): Promise<any> {
   const qs = buildQueryString(searchParams);
   return readJsonOrThrow<any>(`/datasets/analytics/toolkit${qs}`);
+}
+
+export async function getMeasurementGrammar(searchParams?: any): Promise<any> {
+  const qs = buildQueryString(searchParams);
+  return readJsonOrThrow<any>(`/datasets/analytics/measurement-grammar${qs}`);
+}
+
+export async function getReusabilityMap(searchParams?: any): Promise<any> {
+  const qs = buildQueryString(searchParams);
+  return readJsonOrThrow<any>(`/datasets/analytics/reusability-map${qs}`);
+}
+
+export async function getCoverageAtlas(searchParams?: any): Promise<any> {
+  const qs = buildQueryString(searchParams);
+  return readJsonOrThrow<any>(`/datasets/analytics/coverage-atlas${qs}`);
+}
+
+export async function getCorpusTimeline(searchParams?: any): Promise<any> {
+  const qs = buildQueryString(searchParams);
+  return readJsonOrThrow<any>(`/datasets/analytics/timeline${qs}`);
 }
 
 export async function getFrontierData(searchParams?: any): Promise<any[]> {

@@ -8,6 +8,7 @@ import { FacetBar } from "../../components/facet-bar";
 import { getCompare, getDatasets, pickExampleCompareIds } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
 import { ResultSummary } from "../../components/result-summary";
+import { publicationHref, publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 import type { CompareResponse, SearchResponse } from "../../lib/types";
 
@@ -55,21 +56,31 @@ export default async function CorpusPage({
     }
   }
 
-  const isTable = resolvedSearchParams.view !== "cards";
+  const isTable = resolvedSearchParams.view === "table";
 
   const getFilterUrl = (
     newParams: Record<string, string | null>,
     base = "/corpus"
   ) => {
     const params = new URLSearchParams();
-    if (resolvedSearchParams.public === "true") params.set("public", "true");
-    if (resolvedSearchParams.borderline === "true") params.set("borderline", "true");
-    if (resolvedSearchParams.query) params.set("query", resolvedSearchParams.query);
-    if (resolvedSearchParams.family) params.set("family", resolvedSearchParams.family);
-    if (resolvedSearchParams.organelle) params.set("organelle", resolvedSearchParams.organelle);
-    if (resolvedSearchParams.modality) params.set("modality", resolvedSearchParams.modality);
-    if (resolvedSearchParams.pair) params.set("pair", resolvedSearchParams.pair);
-    if (resolvedSearchParams.view) params.set("view", resolvedSearchParams.view);
+    [
+      "public",
+      "borderline",
+      "query",
+      "year",
+      "cell_type",
+      "family",
+      "organelle",
+      "modality",
+      "pair",
+      "metric",
+      "comparator_class",
+      "status",
+      "view"
+    ].forEach((key) => {
+      const value = resolvedSearchParams[key];
+      if (value) params.set(key, value);
+    });
 
     Object.entries(newParams).forEach(([key, value]) => {
       if (value === null) params.delete(key);
@@ -90,8 +101,8 @@ export default async function CorpusPage({
         <div className="kicker">Corpus</div>
         <h1>Search the Whole-Cell Imaging Corpus.</h1>
         <p>
-          Filter the atlas, inspect records quickly in table view, switch to cards when you want
-          more context, and build a compare set from either view.
+          Filter the atlas, inspect records in card view, switch to table when you want a denser
+          scan, and build a compare set from either view.
         </p>
       </section>
 
@@ -127,6 +138,7 @@ export default async function CorpusPage({
 
         <FacetBar
           title="Most Common Traits in This Slice"
+          description="A quick snapshot of the active result set. Click a trait to narrow the corpus to that subset."
           items={[
             {
               label: `datasets: ${searchResponse.total}`,
@@ -135,7 +147,12 @@ export default async function CorpusPage({
                 modality: null,
                 family: null,
                 pair: null,
-                query: null
+                metric: null,
+                cell_type: null,
+                comparator_class: null,
+                query: null,
+                year: null,
+                status: null
               })
             },
             ...searchResponse.commonalities.top_organelles.slice(0, 2).map((o) => ({
@@ -163,13 +180,22 @@ export default async function CorpusPage({
           <h2 className="section-title" style={{ margin: 0 }}>
             {searchResponse.total} {searchResponse.total === 1 ? "result" : "results"}
             {resolvedSearchParams.query && ` for "${resolvedSearchParams.query}"`}
+            {resolvedSearchParams.year && ` filtered by year: ${resolvedSearchParams.year}`}
+            {resolvedSearchParams.cell_type &&
+              ` filtered by cell type: ${resolvedSearchParams.cell_type}`}
             {resolvedSearchParams.organelle &&
               ` filtered by organelle: ${resolvedSearchParams.organelle}`}
             {resolvedSearchParams.modality &&
               ` filtered by modality: ${resolvedSearchParams.modality}`}
             {resolvedSearchParams.family &&
               ` filtered by family: ${resolvedSearchParams.family}`}
+            {resolvedSearchParams.metric &&
+              ` filtered by metric: ${resolvedSearchParams.metric}`}
+            {resolvedSearchParams.comparator_class &&
+              ` filtered by comparator: ${resolvedSearchParams.comparator_class}`}
             {resolvedSearchParams.pair && ` filtered by pair: ${resolvedSearchParams.pair}`}
+            {resolvedSearchParams.status &&
+              ` filtered by public data status: ${resolvedSearchParams.status}`}
             {resolvedSearchParams.public === "true" && " (Public data only)"}
             {resolvedSearchParams.borderline === "true" && " (Including borderline)"}
           </h2>
@@ -251,38 +277,71 @@ export default async function CorpusPage({
                   <th>Dataset</th>
                   <th>Cell Type</th>
                   <th>Modality</th>
-                  <th>Resolution (XY/Z)</th>
-                  <th>Sample</th>
-                  <th>Public data</th>
+                  <th>Voxel Size (XY/Z nm)</th>
+                  <th>Sample Size</th>
+                  <th>Data Publicly Available</th>
                 </tr>
               </thead>
               <tbody>
-                {searchResponse.results.map((d) => (
-                  <tr key={d.dataset_id}>
-                    <td>
-                      <CompareToggle id={d.dataset_id} compact />
-                    </td>
-                    <td>
-                      <Link
-                        href={`/datasets/${d.dataset_id}`}
-                        style={{ fontWeight: 500, textDecoration: "underline" }}
-                      >
-                        {d.title}
-                      </Link>
-                      <div className="muted" style={{ fontSize: "0.8rem" }}>
-                        {d.source_study_id || `${d.source}, ${d.year}`}
-                        {d.publication_pmid ? ` · PMID ${d.publication_pmid}` : ""}
-                      </div>
-                    </td>
-                    <td>{d.cell_type}</td>
-                    <td>{d.modality}</td>
-                    <td>
-                      {d.lateral_resolution_nm} x {d.axial_resolution_nm}
-                    </td>
-                    <td>{d.sample_size}</td>
-                    <td>{d.public_data_status}</td>
-                  </tr>
-                ))}
+                {searchResponse.results.map((d) => {
+                  const paperHref = publicationHref(d);
+                  const dataHref = publicDataHref(d);
+                  const publicLabel = publicDataLabel(d).replace("Data Publicly Available: ", "");
+
+                  return (
+                    <tr key={d.dataset_id}>
+                      <td>
+                        <CompareToggle id={d.dataset_id} compact />
+                      </td>
+                      <td>
+                        <Link
+                          href={`/datasets/${d.dataset_id}`}
+                          style={{ fontWeight: 500, textDecoration: "underline" }}
+                        >
+                          {d.title}
+                        </Link>
+                        <div className="muted" style={{ fontSize: "0.8rem" }}>
+                          {paperHref ? (
+                            <a
+                              href={paperHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: "inherit", textDecoration: "underline" }}
+                            >
+                              {studyCitationLabel(d)}
+                            </a>
+                          ) : (
+                            studyCitationLabel(d)
+                          )}
+                          {d.publication_pmid ? ` · PMID ${d.publication_pmid}` : ""}
+                        </div>
+                      </td>
+                      <td>
+                        <div>{d.cell_type}</div>
+                        <div className="muted" style={{ fontSize: "0.85rem" }}>
+                          <em>{d.species}</em>
+                        </div>
+                      </td>
+                      <td>{d.modality}</td>
+                      <td>{voxelSizeLabel(d)}</td>
+                      <td>{d.sample_size ?? "Unknown"}</td>
+                      <td>
+                        {dataHref ? (
+                          <a
+                            href={dataHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: "inherit", textDecoration: "underline" }}
+                          >
+                            {publicLabel}
+                          </a>
+                        ) : (
+                          publicLabel
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

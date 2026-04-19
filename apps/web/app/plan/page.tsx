@@ -3,10 +3,22 @@ import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { getExperimentPlan, getFacets } from "../../lib/api";
+import { publicDataHref, publicDataLabel, publicationHref, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 import type { DatasetRecord, FacetResponse, PlanAnalysis } from "../../lib/types";
 
 const modalityFamilies = ["EM", "X-ray", "optical", "other"];
+const organelleDisplayNames: Record<string, string> = {
+  er: "endoplasmic reticulum"
+};
+
+function formatOrganelleLabel(value: string) {
+  return organelleDisplayNames[value.toLowerCase()] ?? value;
+}
+
+function formatOrganelleTarget(value: string) {
+  return value.split(" & ").map(formatOrganelleLabel).join(" & ");
+}
 
 export default async function PlanPage({
   searchParams
@@ -150,7 +162,7 @@ export default async function PlanPage({
                   <h2 className="section-title">Active Criteria</h2>
                   <div className="pill-row">
                     {selectedOrganelles.map((organelle) => (
-                      <span key={organelle} className="pill">{organelle}</span>
+                      <span key={organelle} className="pill">{formatOrganelleLabel(organelle)}</span>
                     ))}
                     <span className="pill">Resolution: {resolvedSearchParams.res ? `${resolvedSearchParams.res} nm` : "Any"}</span>
                     <span className="pill">Whole-Cell Count: {resolvedSearchParams.ss || "Any"}</span>
@@ -168,7 +180,7 @@ export default async function PlanPage({
 
                 <section className="panel">
                   <h2 className="section-title">Commonly Reported Metrics</h2>
-                  <p className="muted">Across matching records for <strong>{analysis.biological_target}</strong>, these metric families appear most often:</p>
+                  <p className="muted">Across matching records for <strong>{formatOrganelleTarget(analysis.biological_target)}</strong>, these metric families appear most often:</p>
                   <div className="pill-row" style={{ marginTop: 12 }}>
                     {analysis.standard_metrics.length > 0 ? (
                       analysis.standard_metrics.map((metric: string) => (
@@ -247,7 +259,7 @@ export default async function PlanPage({
                     {analysis.suggested_baselines.length > 0 ? (
                       analysis.suggested_baselines.map((record: DatasetRecord) => (
                         <Link key={record.dataset_id} href={`/datasets/${record.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "12px" }}>
-                          <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{record.source_study_id || record.year} · {record.cell_type}</div>
+                          <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{studyCitationLabel(record)} · {record.cell_type}</div>
                           <div style={{ fontWeight: 500, fontSize: "0.95rem" }}>{record.title}</div>
                           <div className="pill pill-link" style={{ marginTop: 8, textAlign: "center", fontSize: "0.8rem" }}>
                             Open Record
@@ -298,7 +310,7 @@ function PlanForm({
                   value={option.value}
                   defaultChecked={selectedOrganelles.includes(option.value)}
                 />
-                <span>{option.value}</span>
+                <span>{formatOrganelleLabel(option.value)}</span>
                 <span className="muted">{option.count}</span>
               </label>
             ))}
@@ -408,43 +420,80 @@ function PrecedentTable({ records }: { records: DatasetRecord[] }) {
             <th>PMID</th>
             <th>Cell Type</th>
             <th>Modality</th>
-            <th>Resolution</th>
+            <th>Voxel Size</th>
             <th>Whole-Cell Count</th>
             <th>Metrics</th>
-            <th>Public Data</th>
+            <th>Data Publicly Available</th>
           </tr>
         </thead>
         <tbody>
-          {records.map((record) => (
-            <tr key={record.dataset_id}>
-              <td>
-                <Link href={`/datasets/${record.dataset_id}`} style={{ textDecoration: "underline", fontWeight: 500 }}>
-                  {record.source_study_id || record.dataset_id}
-                </Link>
-                <div className="muted" style={{ fontSize: "0.8rem" }}>{record.year} · {record.source}</div>
-              </td>
-              <td>
-                {record.publication_pmid ? (
-                  <a
-                    href={`https://pubmed.ncbi.nlm.nih.gov/${record.publication_pmid}/`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ textDecoration: "underline" }}
-                  >
-                    {record.publication_pmid}
-                  </a>
-                ) : (
-                  <span className="muted">None</span>
-                )}
-              </td>
-              <td>{record.cell_type}</td>
-              <td>{record.modality}</td>
-              <td>{resolutionLabel(record)}</td>
-              <td>{record.sample_size ?? "Unknown"}</td>
-              <td>{record.metric_families.slice(0, 4).join(", ") || "None"}</td>
-              <td>{record.public_data_status}</td>
-            </tr>
-          ))}
+          {records.map((record) => {
+            const paperHref = publicationHref(record);
+            const dataHref = publicDataHref(record);
+            const publicLabel = publicDataLabel(record).replace("Data Publicly Available: ", "");
+
+            return (
+              <tr key={record.dataset_id}>
+                <td>
+                  <Link href={`/datasets/${record.dataset_id}`} style={{ textDecoration: "underline", fontWeight: 500 }}>
+                    {record.title}
+                  </Link>
+                  <div className="muted" style={{ fontSize: "0.8rem" }}>
+                    {paperHref ? (
+                      <a
+                        href={paperHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "inherit", textDecoration: "underline" }}
+                      >
+                        {studyCitationLabel(record)}
+                      </a>
+                    ) : (
+                      studyCitationLabel(record)
+                    )}
+                  </div>
+                </td>
+                <td>
+                  {record.publication_pmid ? (
+                    <a
+                      href={`https://pubmed.ncbi.nlm.nih.gov/${record.publication_pmid}/`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ textDecoration: "underline" }}
+                    >
+                      {record.publication_pmid}
+                    </a>
+                  ) : (
+                    <span className="muted">None</span>
+                  )}
+                </td>
+                <td>
+                  <div>{record.cell_type}</div>
+                  <div className="muted" style={{ fontSize: "0.85rem" }}>
+                    <em>{record.species}</em>
+                  </div>
+                </td>
+                <td>{record.modality}</td>
+                <td>{voxelSizeLabel(record)}</td>
+                <td>{record.sample_size ?? "Unknown"}</td>
+                <td>{record.metric_families.slice(0, 4).join(", ") || "None"}</td>
+                <td>
+                  {dataHref ? (
+                    <a
+                      href={dataHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: "inherit", textDecoration: "underline" }}
+                    >
+                      {publicLabel}
+                    </a>
+                  ) : (
+                    publicLabel
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -522,18 +571,6 @@ function publicRank(status: DatasetRecord["public_data_status"]) {
 
 function unique(values: string[]) {
   return Array.from(new Set(values));
-}
-
-function resolutionLabel(record: DatasetRecord) {
-  if (record.lateral_resolution_nm === null || record.lateral_resolution_nm === undefined) {
-    return "Unknown";
-  }
-
-  if (record.axial_resolution_nm === null || record.axial_resolution_nm === undefined) {
-    return `${record.lateral_resolution_nm} nm XY`;
-  }
-
-  return `${record.lateral_resolution_nm} x ${record.axial_resolution_nm} nm`;
 }
 
 function getStatusColor(status: string) {

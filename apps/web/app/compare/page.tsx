@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { getCompare } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
+import { publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 
 export default async function ComparePage({
@@ -81,8 +82,17 @@ export default async function ComparePage({
 
       <section className="hero">
         <div className="kicker">Compare View</div>
-        <h1>Cross-study alignment for {payload.datasets.length} datasets.</h1>
+        <h1>Dataset-level alignment for {payload.datasets.length} records.</h1>
         <p>{payload.summary}</p>
+      </section>
+
+      <section className="panel" style={{ marginTop: 24 }}>
+        <h2 className="section-title">Dataset-Level Caveat</h2>
+        <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
+          Scion compares dataset records, not always whole papers. A single study can contribute
+          multiple records for different cell types, modalities, or conditions, so same-study
+          comparisons may look more similar than true cross-study comparisons.
+        </p>
       </section>
 
       <div style={{ marginTop: 32 }}>
@@ -99,6 +109,9 @@ export default async function ComparePage({
                   <Link href={`/datasets/${d.dataset_id}`} style={{ textDecoration: "underline" }}>
                     {d.title}
                   </Link>
+                  <div className="muted" style={{ fontSize: "0.8rem", marginTop: 4 }}>
+                    {studyCitationLabel(d)}
+                  </div>
                 </th>
               ))}
             </tr>
@@ -113,7 +126,7 @@ export default async function ComparePage({
             <tr>
               <th>Species</th>
               {payload.datasets.map((d) => (
-                <td key={d.dataset_id}>{d.species}</td>
+                <td key={d.dataset_id}><em>{d.species}</em></td>
               ))}
             </tr>
             <tr>
@@ -123,11 +136,9 @@ export default async function ComparePage({
               ))}
             </tr>
             <tr>
-              <th>Resolution (XY/Z)</th>
+              <th>Voxel Size (XY/Z nm)</th>
               {payload.datasets.map((d) => (
-                <td key={d.dataset_id}>
-                  {d.lateral_resolution_nm}nm / {d.axial_resolution_nm}nm
-                </td>
+                <td key={d.dataset_id}>{voxelSizeLabel(d)}</td>
               ))}
             </tr>
             <tr>
@@ -159,10 +170,28 @@ export default async function ComparePage({
               ))}
             </tr>
             <tr>
-              <th>Public Data</th>
-              {payload.datasets.map((d) => (
-                <td key={d.dataset_id}>{d.public_data_status}</td>
-              ))}
+              <th>Data Publicly Available</th>
+              {payload.datasets.map((d) => {
+                const dataHref = publicDataHref(d);
+                const label = publicDataLabel(d).replace("Data Publicly Available: ", "");
+
+                return (
+                  <td key={d.dataset_id}>
+                    {dataHref ? (
+                      <a
+                        href={dataHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "inherit", textDecoration: "underline" }}
+                      >
+                        {label}
+                      </a>
+                    ) : (
+                      label
+                    )}
+                  </td>
+                );
+              })}
             </tr>
           </tbody>
         </table>

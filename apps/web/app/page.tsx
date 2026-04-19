@@ -148,7 +148,7 @@ export default async function LandingPage({
           {screenCards.map((screen) => (
             <section key={screen.title} className="panel" style={{ background: "var(--background)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-                <h3 style={{ margin: 0 }}>{screen.title}</h3>
+                <h3 className="screen-card-title">{screen.title}</h3>
                 <Link
                   href={screen.href}
                   className="muted"

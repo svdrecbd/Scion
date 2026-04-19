@@ -103,6 +103,18 @@ class BrokenDatasetRepository:
     def get_toolkit_matrix(self, **kwargs):
         raise DatabaseUnavailableError("Scion database is unavailable.")
 
+    def get_measurement_grammar(self, **kwargs):
+        raise DatabaseUnavailableError("Scion database is unavailable.")
+
+    def get_reusability_map(self, **kwargs):
+        raise DatabaseUnavailableError("Scion database is unavailable.")
+
+    def get_coverage_atlas(self, **kwargs):
+        raise DatabaseUnavailableError("Scion database is unavailable.")
+
+    def get_corpus_timeline(self, **kwargs):
+        raise DatabaseUnavailableError("Scion database is unavailable.")
+
     def get_benchmarks(self, **kwargs):
         raise DatabaseUnavailableError("Scion database is unavailable.")
 

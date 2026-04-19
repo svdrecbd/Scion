@@ -18,6 +18,33 @@ const sourceLinks = [
   }
 ];
 
+const feedbackEmail = "svdrecbd@gmail.com";
+const feedbackSubject = "Scion feedback or correction";
+const feedbackBody = [
+  "Page or record:",
+  "",
+  "Issue type: correction / missing data / UI confusion / feature request",
+  "",
+  "What should change:",
+  "",
+  "Source or evidence:",
+  "",
+  "May we follow up? yes / no",
+  ""
+].join("\n");
+const feedbackHref = `mailto:${feedbackEmail}?subject=${encodeURIComponent(feedbackSubject)}&body=${encodeURIComponent(feedbackBody)}`;
+
+const acknowledgementItems = [
+  {
+    label: "Scientific Lead",
+    copy: "Mary Mirvis, PhD."
+  },
+  {
+    label: "Technical Lead",
+    copy: "Salvador Escobedo"
+  }
+];
+
 export default function AboutPage() {
   return (
     <main>
@@ -101,6 +128,37 @@ export default function AboutPage() {
             </section>
           ))}
         </div>
+      </section>
+
+      <section className="panel-grid two" style={{ marginTop: 32 }}>
+        <section className="panel feedback-panel">
+          <div className="kicker">Feedback & Corrections</div>
+          <h2 className="section-title">Help Improve the Index</h2>
+          <p className="muted" style={{ lineHeight: 1.6 }}>
+            Send corrections, missing-public-data leads, confusing labels, or feature requests.
+            The most useful reports include the page or record, what looks wrong, and the source
+            that supports the change.
+          </p>
+
+          <div className="feedback-actions">
+            <a href={feedbackHref} className="button" style={{ textDecoration: "none" }}>
+              Send Feedback
+            </a>
+            <span className="muted">Project inbox: {feedbackEmail}</span>
+          </div>
+        </section>
+
+        <section className="panel">
+          <h2 className="section-title">Acknowledgements</h2>
+          <div className="acknowledgement-list">
+            {acknowledgementItems.map((item) => (
+              <section key={item.label} className="acknowledgement-item">
+                <strong>{item.label}</strong>
+                <p className="muted">{item.copy}</p>
+              </section>
+            ))}
+          </div>
+        </section>
       </section>
     </main>
   );

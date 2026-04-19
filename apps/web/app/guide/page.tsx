@@ -151,6 +151,11 @@ export default function GuidePage() {
             table or card view, then use the compare drawer or Compare link. The empty compare page
             is just a destination, not where selection begins.
           </p>
+          <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.7 }}>
+            Compare is dataset-level. Some papers contribute multiple records, so same-paper
+            comparisons can be useful for checking conditions or modalities but should not be read
+            as independent cross-study validation.
+          </p>
         </section>
 
         <section className="panel">

@@ -34,6 +34,18 @@ def test_seeded_search_reads_from_postgres(integration_client: TestClient) -> No
     assert all(item["included_status"] == "included" for item in payload["results"])
     assert payload["commonalities"]["top_organelles"]
 
+    status_response = integration_client.get("/api/datasets", params={"status": "partial"})
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["results"]
+    assert all(item["public_data_status"] == "partial" for item in status_payload["results"])
+
+    year_response = integration_client.get("/api/datasets", params={"year": "2024"})
+    assert year_response.status_code == 200
+    year_payload = year_response.json()
+    assert year_payload["results"]
+    assert all(item["year"] == 2024 for item in year_payload["results"])
+
     facets_response = integration_client.get("/api/datasets/facets")
     assert facets_response.status_code == 200
     facets_payload = facets_response.json()
@@ -123,6 +135,49 @@ def test_analytics_routes_use_seeded_postgres_aggregates(
     toolkit_payload = toolkit_response.json()
     assert toolkit_payload["modalities"] == ["EM"]
     assert toolkit_payload["organelles"]
+
+    grammar_response = integration_client.get(
+        "/api/datasets/analytics/measurement-grammar",
+        params={"family": "EM"},
+    )
+    assert grammar_response.status_code == 200
+    grammar_payload = grammar_response.json()
+    assert grammar_payload["organelles"]
+    assert grammar_payload["metric_families"]
+    assert grammar_payload["matrix"]
+    assert any(grammar_payload["organelle_metric_family_counts"].values())
+
+    reusability_response = integration_client.get(
+        "/api/datasets/analytics/reusability-map",
+        params={"family": "EM"},
+    )
+    assert reusability_response.status_code == 200
+    reusability_payload = reusability_response.json()
+    assert reusability_payload["statuses"] == ["complete", "partial", "none"]
+    assert reusability_payload["organelles"]
+    assert reusability_payload["matrix"]
+    assert any(reusability_payload["row_totals"].values())
+
+    coverage_response = integration_client.get(
+        "/api/datasets/analytics/coverage-atlas",
+        params={"family": "EM"},
+    )
+    assert coverage_response.status_code == 200
+    coverage_payload = coverage_response.json()
+    assert coverage_payload["cell_types"]
+    assert coverage_payload["organelles"]
+    assert coverage_payload["matrix"]
+    assert any(coverage_payload["cell_type_totals"].values())
+
+    timeline_response = integration_client.get(
+        "/api/datasets/analytics/timeline",
+        params={"family": "EM"},
+    )
+    assert timeline_response.status_code == 200
+    timeline_payload = timeline_response.json()
+    assert timeline_payload["years"]
+    assert timeline_payload["modality_families"] == ["EM"]
+    assert any(timeline_payload["year_totals"].values())
 
     benchmarks_response = integration_client.get("/api/datasets/analytics/benchmarks")
     assert benchmarks_response.status_code == 200

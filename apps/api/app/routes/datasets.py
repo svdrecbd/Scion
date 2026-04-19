@@ -92,6 +92,7 @@ def _build_plan_analysis(
 @router.get("", response_model=SearchResponse)
 def search_datasets(
     query: str | None = None,
+    year: int | None = None,
     cell_type: str | None = None,
     organelle: str | None = None,
     organelle_pair: str | None = Query(default=None, alias="pair"),
@@ -99,28 +100,17 @@ def search_datasets(
     modality_family: str | None = Query(default=None, alias="family"),
     metric_family: str | None = Query(default=None, alias="metric"),
     comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
     public_data_only: bool = Query(default=False, alias="public"),
     include_borderline: bool = Query(default=False, alias="borderline"),
     limit: int = Query(default=200, ge=1, le=500),
     repository: DatasetRepository = Depends(get_dataset_repository),
 ) -> SearchResponse:
     started_at = perf_counter()
-    page = repository.search_datasets(
-        query=query,
-        cell_type=cell_type,
-        organelle=organelle,
-        organelle_pair=organelle_pair,
-        modality=modality,
-        modality_family=modality_family,
-        metric_family=metric_family,
-        comparator_class=comparator_class,
-        public_data_only=public_data_only,
-        include_borderline=include_borderline,
-        limit=limit,
-    )
-    commonalities = (
-        repository.get_search_commonalities(
+    try:
+        page = repository.search_datasets(
             query=query,
+            year=year,
             cell_type=cell_type,
             organelle=organelle,
             organelle_pair=organelle_pair,
@@ -128,6 +118,25 @@ def search_datasets(
             modality_family=modality_family,
             metric_family=metric_family,
             comparator_class=comparator_class,
+            public_data_status=public_data_status,
+            public_data_only=public_data_only,
+            include_borderline=include_borderline,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    commonalities = (
+        repository.get_search_commonalities(
+            query=query,
+            year=year,
+            cell_type=cell_type,
+            organelle=organelle,
+            organelle_pair=organelle_pair,
+            modality=modality,
+            modality_family=modality_family,
+            metric_family=metric_family,
+            comparator_class=comparator_class,
+            public_data_status=public_data_status,
             public_data_only=public_data_only,
             include_borderline=include_borderline,
         )
@@ -159,6 +168,7 @@ def search_datasets(
 def export_datasets(
     format: str = Query("csv", pattern="^(csv|json|bibtex)$"),
     query: str | None = None,
+    year: int | None = None,
     cell_type: str | None = None,
     organelle: str | None = None,
     organelle_pair: str | None = Query(default=None, alias="pair"),
@@ -166,6 +176,7 @@ def export_datasets(
     modality_family: str | None = Query(default=None, alias="family"),
     metric_family: str | None = Query(default=None, alias="metric"),
     comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
     public_data_only: bool = Query(default=False, alias="public"),
     include_borderline: bool = Query(default=False, alias="borderline"),
     repository: DatasetRepository = Depends(get_dataset_repository),
@@ -174,18 +185,23 @@ def export_datasets(
     settings = get_settings()
 
     with _guard_export_slot():
-        filtered = repository.list_datasets(
-            query=query,
-            cell_type=cell_type,
-            organelle=organelle,
-            organelle_pair=organelle_pair,
-            modality=modality,
-            modality_family=modality_family,
-            metric_family=metric_family,
-            comparator_class=comparator_class,
-            public_data_only=public_data_only,
-            include_borderline=include_borderline,
-        )
+        try:
+            filtered = repository.list_datasets(
+                query=query,
+                year=year,
+                cell_type=cell_type,
+                organelle=organelle,
+                organelle_pair=organelle_pair,
+                modality=modality,
+                modality_family=modality_family,
+                metric_family=metric_family,
+                comparator_class=comparator_class,
+                public_data_status=public_data_status,
+                public_data_only=public_data_only,
+                include_borderline=include_borderline,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if len(filtered) > settings.export_max_rows:
             route_logger.warning(
@@ -370,6 +386,7 @@ def get_cross_tab(
 @router.get("/analytics/frontier")
 def get_frontier_data(
     query: str | None = None,
+    year: int | None = None,
     cell_type: str | None = None,
     organelle: str | None = None,
     organelle_pair: str | None = Query(default=None, alias="pair"),
@@ -377,6 +394,7 @@ def get_frontier_data(
     modality_family: str | None = Query(default=None, alias="family"),
     metric_family: str | None = Query(default=None, alias="metric"),
     comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
     public_data_only: bool = Query(default=False, alias="public"),
     include_borderline: bool = Query(default=False, alias="borderline"),
     repository: DatasetRepository = Depends(get_dataset_repository),
@@ -385,6 +403,7 @@ def get_frontier_data(
     with _guard_analytics_slot("datasets.analytics.frontier"):
         result = repository.get_frontier_data(
             query=query,
+            year=year,
             cell_type=cell_type,
             organelle=organelle,
             organelle_pair=organelle_pair,
@@ -392,6 +411,7 @@ def get_frontier_data(
             modality_family=modality_family,
             metric_family=metric_family,
             comparator_class=comparator_class,
+            public_data_status=public_data_status,
             public_data_only=public_data_only,
             include_borderline=include_borderline,
         )
@@ -406,6 +426,7 @@ def get_frontier_data(
 @router.get("/analytics/toolkit")
 def get_toolkit_matrix(
     query: str | None = None,
+    year: int | None = None,
     cell_type: str | None = None,
     organelle: str | None = None,
     organelle_pair: str | None = Query(default=None, alias="pair"),
@@ -413,6 +434,7 @@ def get_toolkit_matrix(
     modality_family: str | None = Query(default=None, alias="family"),
     metric_family: str | None = Query(default=None, alias="metric"),
     comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
     public_data_only: bool = Query(default=False, alias="public"),
     include_borderline: bool = Query(default=False, alias="borderline"),
     repository: DatasetRepository = Depends(get_dataset_repository),
@@ -421,6 +443,7 @@ def get_toolkit_matrix(
     with _guard_analytics_slot("datasets.analytics.toolkit"):
         response = repository.get_toolkit_matrix(
             query=query,
+            year=year,
             cell_type=cell_type,
             organelle=organelle,
             organelle_pair=organelle_pair,
@@ -428,6 +451,7 @@ def get_toolkit_matrix(
             modality_family=modality_family,
             metric_family=metric_family,
             comparator_class=comparator_class,
+            public_data_status=public_data_status,
             public_data_only=public_data_only,
             include_borderline=include_borderline,
         )
@@ -436,6 +460,181 @@ def get_toolkit_matrix(
             started_at,
             organelle_count=len(response["organelles"]),
             modality_count=len(response["modalities"]),
+        )
+        return response
+
+
+@router.get("/analytics/measurement-grammar")
+def get_measurement_grammar(
+    query: str | None = None,
+    year: int | None = None,
+    cell_type: str | None = None,
+    organelle: str | None = None,
+    organelle_pair: str | None = Query(default=None, alias="pair"),
+    modality: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
+    public_data_only: bool = Query(default=False, alias="public"),
+    include_borderline: bool = Query(default=False, alias="borderline"),
+    repository: DatasetRepository = Depends(get_dataset_repository),
+):
+    started_at = perf_counter()
+    with _guard_analytics_slot("datasets.analytics.measurement_grammar"):
+        response = repository.get_measurement_grammar(
+            query=query,
+            year=year,
+            cell_type=cell_type,
+            organelle=organelle,
+            organelle_pair=organelle_pair,
+            modality=modality,
+            modality_family=modality_family,
+            metric_family=metric_family,
+            comparator_class=comparator_class,
+            public_data_status=public_data_status,
+            public_data_only=public_data_only,
+            include_borderline=include_borderline,
+        )
+        _log_route_timing(
+            "datasets.analytics.measurement_grammar",
+            started_at,
+            organelle_count=len(response["organelles"]),
+            metric_family_count=len(response["metric_families"]),
+        )
+        return response
+
+
+@router.get("/analytics/reusability-map")
+def get_reusability_map(
+    query: str | None = None,
+    year: int | None = None,
+    cell_type: str | None = None,
+    organelle: str | None = None,
+    organelle_pair: str | None = Query(default=None, alias="pair"),
+    modality: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
+    public_data_only: bool = Query(default=False, alias="public"),
+    include_borderline: bool = Query(default=False, alias="borderline"),
+    repository: DatasetRepository = Depends(get_dataset_repository),
+):
+    started_at = perf_counter()
+    with _guard_analytics_slot("datasets.analytics.reusability_map"):
+        try:
+            response = repository.get_reusability_map(
+                query=query,
+                year=year,
+                cell_type=cell_type,
+                organelle=organelle,
+                organelle_pair=organelle_pair,
+                modality=modality,
+                modality_family=modality_family,
+                metric_family=metric_family,
+                comparator_class=comparator_class,
+                public_data_status=public_data_status,
+                public_data_only=public_data_only,
+                include_borderline=include_borderline,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        _log_route_timing(
+            "datasets.analytics.reusability_map",
+            started_at,
+            organelle_count=len(response["organelles"]),
+        )
+        return response
+
+
+@router.get("/analytics/coverage-atlas")
+def get_coverage_atlas(
+    query: str | None = None,
+    year: int | None = None,
+    cell_type: str | None = None,
+    organelle: str | None = None,
+    organelle_pair: str | None = Query(default=None, alias="pair"),
+    modality: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
+    public_data_only: bool = Query(default=False, alias="public"),
+    include_borderline: bool = Query(default=False, alias="borderline"),
+    repository: DatasetRepository = Depends(get_dataset_repository),
+):
+    started_at = perf_counter()
+    with _guard_analytics_slot("datasets.analytics.coverage_atlas"):
+        try:
+            response = repository.get_coverage_atlas(
+                query=query,
+                year=year,
+                cell_type=cell_type,
+                organelle=organelle,
+                organelle_pair=organelle_pair,
+                modality=modality,
+                modality_family=modality_family,
+                metric_family=metric_family,
+                comparator_class=comparator_class,
+                public_data_status=public_data_status,
+                public_data_only=public_data_only,
+                include_borderline=include_borderline,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        _log_route_timing(
+            "datasets.analytics.coverage_atlas",
+            started_at,
+            cell_type_count=len(response["cell_types"]),
+            organelle_count=len(response["organelles"]),
+        )
+        return response
+
+
+@router.get("/analytics/timeline")
+def get_corpus_timeline(
+    query: str | None = None,
+    year: int | None = None,
+    cell_type: str | None = None,
+    organelle: str | None = None,
+    organelle_pair: str | None = Query(default=None, alias="pair"),
+    modality: str | None = None,
+    modality_family: str | None = Query(default=None, alias="family"),
+    metric_family: str | None = Query(default=None, alias="metric"),
+    comparator_class: str | None = None,
+    public_data_status: str | None = Query(default=None, alias="status"),
+    public_data_only: bool = Query(default=False, alias="public"),
+    include_borderline: bool = Query(default=False, alias="borderline"),
+    repository: DatasetRepository = Depends(get_dataset_repository),
+):
+    started_at = perf_counter()
+    with _guard_analytics_slot("datasets.analytics.timeline"):
+        try:
+            response = repository.get_corpus_timeline(
+                query=query,
+                year=year,
+                cell_type=cell_type,
+                organelle=organelle,
+                organelle_pair=organelle_pair,
+                modality=modality,
+                modality_family=modality_family,
+                metric_family=metric_family,
+                comparator_class=comparator_class,
+                public_data_status=public_data_status,
+                public_data_only=public_data_only,
+                include_borderline=include_borderline,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        _log_route_timing(
+            "datasets.analytics.timeline",
+            started_at,
+            year_count=len(response["years"]),
+            modality_family_count=len(response["modality_families"]),
         )
         return response
 

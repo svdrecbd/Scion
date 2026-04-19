@@ -5,20 +5,9 @@ import { DegradedStatusBanner } from "../../../components/degraded-status-banner
 import { getDataset, getSimilarDatasets } from "../../../lib/api";
 import { isNotFoundApiError } from "../../../lib/api-errors";
 import type { DatasetRecord } from "../../../lib/types";
+import { publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../../lib/display";
 import { FacetBar } from "../../../components/facet-bar";
 import { CitationButton } from "../../../components/citation-button";
-
-function firstAuthorLabel(datasetId: string) {
-  const slug = datasetId.split("-")[0] || datasetId;
-  return slug
-    .split(/[_\s]+/)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function citationLabel(dataset: DatasetRecord) {
-  return dataset.source_study_id || `${firstAuthorLabel(dataset.dataset_id)} ${dataset.year}`;
-}
 
 export default async function DatasetPage({
   params
@@ -68,6 +57,8 @@ export default async function DatasetPage({
     similarError = error;
   }
 
+  const dataHref = publicDataHref(dataset);
+
   return (
     <main>
       <div style={{ marginBottom: 24 }}>
@@ -78,7 +69,10 @@ export default async function DatasetPage({
 
       <section className="hero">
         <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: 8 }}>
-          <div className="kicker" style={{ margin: 0 }}>{dataset.cell_type} · {dataset.species}</div>
+          <div className="kicker" style={{ margin: 0 }}>{dataset.cell_type}</div>
+          <div className="muted" style={{ fontSize: "0.9rem" }}>
+            <em>{dataset.species}</em>
+          </div>
           {dataset.included_status === "borderline" && (
             <span className="pill badge-borderline">Borderline Study</span>
           )}
@@ -86,7 +80,7 @@ export default async function DatasetPage({
         <h1>{dataset.title}</h1>
         <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
           <p className="muted" style={{ margin: 0 }}>
-            <strong>{citationLabel(dataset)}</strong> · {dataset.source}
+            <strong>{studyCitationLabel(dataset)}</strong>
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
@@ -138,10 +132,9 @@ export default async function DatasetPage({
                 <div style={{ fontSize: "1.1rem" }}>{dataset.modality}</div>
               </div>
               <div>
-                <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Resolution</div>
+                <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Voxel Size</div>
                 <div style={{ fontSize: "1.1rem" }}>
-                  {dataset.lateral_resolution_nm}nm x {dataset.axial_resolution_nm}nm
-                  {dataset.isotropic ? " (Isotropic)" : ""}
+                  {voxelSizeLabel(dataset)}
                 </div>
               </div>
               <div>
@@ -203,9 +196,20 @@ export default async function DatasetPage({
                 </a>
               )}
               {dataset.public_data_status !== "none" && (
-                <div className="pill" style={{ background: "var(--foreground)", color: "var(--background)", borderColor: "var(--foreground)" }}>
-                  Public Data Available ({dataset.public_data_status})
-                </div>
+                dataHref ? (
+                  <a
+                    href={dataHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="pill pill-link"
+                  >
+                    {publicDataLabel(dataset)}
+                  </a>
+                ) : (
+                  <div className="pill" style={{ background: "var(--foreground)", color: "var(--background)", borderColor: "var(--foreground)" }}>
+                    {publicDataLabel(dataset)}
+                  </div>
+                )
               )}
             </div>
             {(dataset.public_locator_urls?.length ?? 0) > 0 && (
