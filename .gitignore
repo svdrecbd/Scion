@@ -20,3 +20,5 @@ out/
 # Local data
 *.sqlite3
 .run/
+scion-public-data/
+public-data/

@@ -33,12 +33,31 @@ This is the internal working notebook for Scion.
 - Shifted more expensive analytics/search work into SQL to keep the API fast and low-bloat.
 - Fixed CI so local `Makefile` targets work both with the repo venv and with GitHub Actions runner Python.
 
+### Phase 6: Public Data Pilot Ingestion
+- Added a dependency-light EMPIAR/Figshare pilot worker for public-data mirroring tests.
+- Pilot outputs download manifests, checksum file inventories, normalized asset manifests, validation reports, and middle-slice previews.
+- Added offline reruns from cached source metadata plus cached download manifests, so local validation can be repeated without network.
+- Added an asset-state manifest that separates `source_asset`, `mirrored_asset`, `validated_volume`, and `streamable_derivative`.
+- Added a conversion-readiness manifest and curation review queue so validated volumes can be separated from blocked assets before OME-Zarr work.
+- Added a local pilot index page across mirrored datasets for quick inspection and dataset selection.
+- Added a dependency-light OME-Zarr conversion spike that writes a single-scale Zarr v2 / OME-NGFF derivative for one validated TIFF volume and records it in a derivative manifest.
+- Added a native Scion Slice Viewer path: sampled browser PNG planes, `slice-manifest.json`, and a local-only `/pilot/viewer` route for fast inspection before heavier OME-Zarr/Neuroglancer integration.
+- Added non-network ingestion unit tests for metadata source priority, TIFF/ImageJ scale extraction, TrakEM2 calibration sidecars, MRC default-scale warnings, Figshare z-spacing warnings, and collection-level imageset-count warnings.
+- First validated pilot: Rudlaff 2020 / EMPIAR-10392, 11 files, 3.938 GiB, MRC plus TIFF.
+- Second validated pilot: Uwizeye 2021b / EMPIAR-10672, 8 files, 2.915 GiB, recursive EMPIAR folders and TIFF-only volumes.
+- Third validated pilot: Laundon 2019 / Figshare-7346750, 30 files, 3.019 GiB, TIFF volumes plus TrakEM2 XML sidecars.
+- Hardening finding: raw file headers are not authoritative by default. Rudlaff MRC headers encode default-looking physical scale while curated metadata says 10 x 10 x 20 nm.
+- Hardening finding: EMPIAR imageset metadata can be collection-level rather than file-level. Uwizeye reports 500 images for one imageset spanning 8 local TIFF files and 4848 total local slices.
+- Hardening finding: Figshare TIFFs may need paired TrakEM2 XML calibration sidecars for physical voxel size. Laundon has one TIFF held at `needs_review` because the parsed z-spacing is suspiciously small.
+
 ## dead ends & decisions
 
 - **Rejected: Docker**. Decided native Postgres setup aligns better with the "no-bloat" ethos and reduces overhead for local dev.
 - **Decision: Raw SVG**. Rejected Recharts/D3 to keep the frontend bundle under 100KB and ensure pixel-perfect typography integration.
 - **Decision: Borderline Studies**. Instead of excluding near-misses, we chose to "badge and reveal" to maximize evidence transparency.
 - **Decision: Thin frontend**. The main latency pressure is page composition, not the API. Keep backend semantics strong and avoid frontend-state bloat unless the product genuinely needs it.
+- **Decision: Full-data ingest starts as audit-first**. Before conversion or serving, every public dataset must produce a reproducible manifest, checksum inventory, scale/provenance decision, validation report, and preview page.
+- **Decision: Native viewer before Neuroglancer**. Scion should own the default low-bloat slice-viewing experience. Neuroglancer belongs behind an advanced-viewer path until user needs justify deeper integration or a maintained fork.
 
 ## Team Rules
 
