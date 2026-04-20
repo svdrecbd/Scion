@@ -6,7 +6,11 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Logo } from "./logo";
 import { useCompare } from "../lib/compare-context";
 
-export function Navbar() {
+type NavbarProps = {
+  showPilot?: boolean;
+};
+
+export function Navbar({ showPilot = false }: NavbarProps) {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   
@@ -146,6 +150,11 @@ export function Navbar() {
               <Link href="/plan" className="nav-link">
                 Plan
               </Link>
+              {showPilot ? (
+                <Link href="/pilot" className="nav-link">
+                  Pilot
+                </Link>
+              ) : null}
               <Link href="/about" className="nav-link">
                 About
               </Link>

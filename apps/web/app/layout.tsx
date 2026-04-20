@@ -26,12 +26,14 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const showPilot = process.env.NODE_ENV !== "production" || process.env.SCION_ENABLE_PUBLIC_DATA_PILOT === "true";
+
   return (
     <html lang="en" className={`${ebGaramond.className} ${ebGaramond.variable}`}>
       <body>
         <CompareProvider>
           <Suspense fallback={<nav className="navbar" />}>
-            <Navbar />
+            <Navbar showPilot={showPilot} />
           </Suspense>
           {children}
           <Suspense fallback={null}>
