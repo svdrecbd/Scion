@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type SliceFrame = {
   sequenceIndex: number;
@@ -31,33 +31,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function formatDistance(nm: number): string {
-  if (nm >= 1000) {
-    const microns = nm / 1000;
-    return `${Number.isInteger(microns) ? microns.toFixed(0) : microns.toFixed(1)} µm`;
-  }
-  return `${Math.round(nm)} nm`;
-}
-
-function chooseScaleBar(
-  frameWidth: number,
-  sourceWidth: number,
-  physicalVoxelSizeNm: Record<string, string | number>
-): { label: string; widthPercent: number } | null {
-  const xNm = Number(physicalVoxelSizeNm.x);
-  if (!Number.isFinite(xNm) || xNm <= 0 || frameWidth <= 0 || sourceWidth <= 0) {
-    return null;
-  }
-
-  const nmPerFramePixel = xNm * (sourceWidth / frameWidth);
-  const fieldWidthNm = frameWidth * nmPerFramePixel;
-  const targetNm = fieldWidthNm * 0.22;
-  const candidates = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
-  const selectedNm = [...candidates].reverse().find((candidate) => candidate <= targetNm) || candidates[0];
-  const widthPercent = clamp((selectedNm / nmPerFramePixel / frameWidth) * 100, 4, 50);
-  return { label: formatDistance(selectedNm), widthPercent };
-}
-
 function prioritizedIndices(length: number, center: number): number[] {
   const safeCenter = clamp(center, 0, Math.max(length - 1, 0));
   const indices: number[] = [];
@@ -86,11 +59,6 @@ export function PilotSliceViewer({
   const [warmedFrameCount, setWarmedFrameCount] = useState(0);
   const [warmupComplete, setWarmupComplete] = useState(frames.length <= 1);
   const frame = frames[frameIndex] || frames[0];
-  const sourceWidth = sourceShapeZyx[2] || frame?.width || 0;
-  const scaleBar = useMemo(
-    () => (frame ? chooseScaleBar(frame.width, sourceWidth, physicalVoxelSizeNm) : null),
-    [frame, physicalVoxelSizeNm, sourceWidth]
-  );
   const isSampled = samplingMode !== "all" && frames.length < sourceSlices;
 
   useEffect(() => {
@@ -218,11 +186,6 @@ export function PilotSliceViewer({
                 }
               }}
             />
-            {scaleBar ? (
-              <div className="slice-viewer-scale" style={{ width: `${scaleBar.widthPercent}%` }}>
-                <span>{scaleBar.label}</span>
-              </div>
-            ) : null}
           </div>
         </div>
       </div>
