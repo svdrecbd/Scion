@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type SliceFrame = {
   sequenceIndex: number;
@@ -58,6 +58,18 @@ function chooseScaleBar(
   return { label: formatDistance(selectedNm), widthPercent };
 }
 
+function prioritizedIndices(length: number, center: number): number[] {
+  const safeCenter = clamp(center, 0, Math.max(length - 1, 0));
+  const indices: number[] = [];
+  for (let offset = 0; offset < length; offset += 1) {
+    const before = safeCenter - offset;
+    const after = safeCenter + offset;
+    if (before >= 0) indices.push(before);
+    if (offset > 0 && after < length) indices.push(after);
+  }
+  return indices;
+}
+
 export function PilotSliceViewer({
   title,
   sourceRelativePath,
@@ -70,6 +82,9 @@ export function PilotSliceViewer({
   frames,
 }: PilotSliceViewerProps) {
   const [frameIndex, setFrameIndex] = useState(Math.floor(frames.length / 2));
+  const warmedFrames = useRef<Set<string>>(new Set());
+  const [warmedFrameCount, setWarmedFrameCount] = useState(0);
+  const [warmupComplete, setWarmupComplete] = useState(frames.length <= 1);
   const frame = frames[frameIndex] || frames[0];
   const sourceWidth = sourceShapeZyx[2] || frame?.width || 0;
   const scaleBar = useMemo(
@@ -79,24 +94,58 @@ export function PilotSliceViewer({
   const isSampled = samplingMode !== "all" && frames.length < sourceSlices;
 
   useEffect(() => {
-    if (frames.length === 0) return;
-    const preloadIndices = [
-      frameIndex - 2,
-      frameIndex - 1,
-      frameIndex + 1,
-      frameIndex + 2,
-    ].filter((index) => index >= 0 && index < frames.length);
+    warmedFrames.current.clear();
+    setWarmedFrameCount(0);
+    setWarmupComplete(frames.length <= 1);
+  }, [frames]);
 
-    const preloads = preloadIndices.map((index) => {
-      const image = new Image();
-      image.src = frames[index].href;
-      return image;
-    });
+  useEffect(() => {
+    if (frames.length === 0) return;
+    let cancelled = false;
+    let cursor = 0;
+    const concurrency = Math.min(4, frames.length);
+    const orderedFrames = prioritizedIndices(frames.length, frameIndex).map((index) => frames[index]);
+
+    function markWarmed(href: string) {
+      if (cancelled || warmedFrames.current.has(href)) return;
+      warmedFrames.current.add(href);
+      setWarmedFrameCount(warmedFrames.current.size);
+      if (warmedFrames.current.size >= frames.length) {
+        setWarmupComplete(true);
+      }
+    }
+
+    function preloadFrame(href: string): Promise<void> {
+      if (warmedFrames.current.has(href)) return Promise.resolve();
+      return new Promise((resolve) => {
+        const image = new Image();
+        image.decoding = "async";
+        image.onload = () => {
+          markWarmed(href);
+          resolve();
+        };
+        image.onerror = () => {
+          resolve();
+        };
+        image.src = href;
+      });
+    }
+
+    async function worker() {
+      while (!cancelled && cursor < orderedFrames.length) {
+        const nextFrame = orderedFrames[cursor];
+        cursor += 1;
+        await preloadFrame(nextFrame.href);
+      }
+    }
+
+    const start = window.setTimeout(() => {
+      void Promise.all(Array.from({ length: concurrency }, worker));
+    }, 150);
 
     return () => {
-      preloads.forEach((image) => {
-        image.src = "";
-      });
+      cancelled = true;
+      window.clearTimeout(start);
     };
   }, [frameIndex, frames]);
 
@@ -162,6 +211,12 @@ export function PilotSliceViewer({
               alt={`${sourceRelativePath} z slice ${frame.zIndex + 1}`}
               width={frame.width}
               height={frame.height}
+              onLoad={() => {
+                if (!warmedFrames.current.has(frame.href)) {
+                  warmedFrames.current.add(frame.href);
+                  setWarmedFrameCount(warmedFrames.current.size);
+                }
+              }}
             />
             {scaleBar ? (
               <div className="slice-viewer-scale" style={{ width: `${scaleBar.widthPercent}%` }}>
@@ -194,6 +249,9 @@ export function PilotSliceViewer({
           {valueLabel(physicalVoxelSizeNm.z)} nm
         </span>
         <span>Contrast: {contrastMode.replaceAll("_", " ")}. {contrastNote}</span>
+        <span>
+          Frame cache: {warmupComplete ? "ready" : `warming ${warmedFrameCount}/${frames.length}`}
+        </span>
         <span>Keyboard: ←/→ step, Home/End jump.</span>
       </div>
     </section>

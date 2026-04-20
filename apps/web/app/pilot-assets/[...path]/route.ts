@@ -13,6 +13,13 @@ const contentTypes: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+function cacheControlFor(contentType: string): string {
+  if (contentType.startsWith("image/")) {
+    return "public, max-age=86400";
+  }
+  return "no-store";
+}
+
 export async function GET(
   _request: Request,
   context: { params: Promise<{ path: string[] }> }
@@ -35,7 +42,7 @@ export async function GET(
     const contentType = contentTypes[extname(filePath).toLowerCase()] || "application/octet-stream";
     return new Response(file, {
       headers: {
-        "Cache-Control": "no-store",
+        "Cache-Control": cacheControlFor(contentType),
         "Content-Type": contentType,
       },
     });
