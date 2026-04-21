@@ -1223,6 +1223,22 @@ main {
   height: 100%;
 }
 
+.pilot-lineup-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pilot-lineup-card h3,
+.pilot-lineup-card p {
+  overflow-wrap: anywhere;
+}
+
+.pilot-lineup-card .pill-row {
+  margin-top: auto;
+  padding-top: 18px;
+}
+
 .screen-card-title {
   margin: 0;
   font-family: var(--font-display);

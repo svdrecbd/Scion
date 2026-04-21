@@ -63,7 +63,7 @@ export default async function PilotPage() {
               href={`/pilot/${encodeURIComponent(record.slug)}`}
               className="dataset-card-link"
             >
-              <article className="dataset-card">
+              <article className="panel dataset-card pilot-lineup-card">
                 <div className="kicker">
                   {record.dataset.source} {record.dataset.entry_id}
                 </div>
