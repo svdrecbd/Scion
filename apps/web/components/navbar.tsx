@@ -13,6 +13,7 @@ type NavbarProps = {
 export function Navbar({ showPilot = false }: NavbarProps) {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [pilotVisible, setPilotVisible] = useState(showPilot);
   
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -66,6 +67,25 @@ export function Navbar({ showPilot = false }: NavbarProps) {
       setIsAdvancedOpen(false);
     }
   }, [isCorpusRoute]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch("/pilot-status", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((status: { enabled?: boolean } | null) => {
+        if (!cancelled && typeof status?.enabled === "boolean") {
+          setPilotVisible(status.enabled);
+        }
+      })
+      .catch(() => {
+        // Keep the server-rendered value if the runtime check fails.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <nav className="navbar-container">
@@ -150,7 +170,7 @@ export function Navbar({ showPilot = false }: NavbarProps) {
               <Link href="/plan" className="nav-link">
                 Plan
               </Link>
-              {showPilot ? (
+              {pilotVisible ? (
                 <Link href="/pilot" className="nav-link">
                   Pilot
                 </Link>
