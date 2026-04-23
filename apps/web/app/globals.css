@@ -1082,6 +1082,15 @@ main {
   line-height: 1.6;
 }
 
+.landing-hero {
+  width: min(calc(100vw - (2 * var(--page-gutter))), 1540px);
+  max-width: none;
+}
+
+.landing-hero p {
+  max-width: 1320px;
+}
+
 .panel {
   background: var(--accent);
   border: 1px solid var(--border);

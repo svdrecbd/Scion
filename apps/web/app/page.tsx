@@ -64,7 +64,7 @@ export default async function LandingPage({
 
   return (
     <main>
-      <section className="hero" style={{ marginBottom: 36 }}>
+      <section className="hero landing-hero" style={{ marginBottom: 36 }}>
         <div className="kicker">Whole-Cell Imaging Atlas</div>
         <h1>Find Precedent, Compare Datasets, and Map the Structure of the Field.</h1>
         <p>
