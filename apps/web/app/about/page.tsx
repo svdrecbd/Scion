@@ -131,23 +131,6 @@ export default function AboutPage() {
       </section>
 
       <section className="panel-grid two" style={{ marginTop: 32 }}>
-        <section className="panel feedback-panel">
-          <div className="kicker">Feedback & Corrections</div>
-          <h2 className="section-title">Help Improve the Index</h2>
-          <p className="muted" style={{ lineHeight: 1.6 }}>
-            Send corrections, missing-public-data leads, confusing labels, or feature requests.
-            The most useful reports include the page or record, what looks wrong, and the source
-            that supports the change.
-          </p>
-
-          <div className="feedback-actions">
-            <a href={feedbackHref} className="button" style={{ textDecoration: "none" }}>
-              Send Feedback
-            </a>
-            <span className="muted">Project inbox: {feedbackEmail}</span>
-          </div>
-        </section>
-
         <section className="panel">
           <h2 className="section-title">Acknowledgements</h2>
           <div className="acknowledgement-list">
@@ -202,8 +185,9 @@ export default function AboutPage() {
                   rel="noopener noreferrer"
                   style={{ textDecoration: "underline" }}
                 >
-                  Wallace F. Marshall Lab
-                </a>.
+                  Laboratory of Cell Geometry
+                </a>
+                , directed by Wallace F. Marshall.
               </p>
               <p className="muted" style={{ margin: "8px 0 0", lineHeight: 1.7 }}>
                 The underlying work was supported by the{" "}
@@ -217,6 +201,23 @@ export default function AboutPage() {
                 </a>.
               </p>
             </section>
+          </div>
+        </section>
+
+        <section className="panel feedback-panel">
+          <div className="kicker">Feedback & Corrections</div>
+          <h2 className="section-title">Help Improve the Index</h2>
+          <p className="muted" style={{ lineHeight: 1.6 }}>
+            Send corrections, missing-public-data leads, confusing labels, or feature requests.
+            The most useful reports include the page or record, what looks wrong, and the source
+            that supports the change.
+          </p>
+
+          <div className="feedback-actions">
+            <a href={feedbackHref} className="button" style={{ textDecoration: "none" }}>
+              Send Feedback
+            </a>
+            <span className="muted">Project inbox: {feedbackEmail}</span>
           </div>
         </section>
       </section>
