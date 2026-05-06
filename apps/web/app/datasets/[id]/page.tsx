@@ -5,7 +5,7 @@ import { DegradedStatusBanner } from "../../../components/degraded-status-banner
 import { getDataset, getSimilarDatasets } from "../../../lib/api";
 import { isNotFoundApiError } from "../../../lib/api-errors";
 import type { DatasetRecord } from "../../../lib/types";
-import { publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../../lib/display";
+import { publicationHref, publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../../lib/display";
 import { FacetBar } from "../../../components/facet-bar";
 import { CitationButton } from "../../../components/citation-button";
 
@@ -58,6 +58,7 @@ export default async function DatasetPage({
   }
 
   const dataHref = publicDataHref(dataset);
+  const paperHref = publicationHref(dataset);
 
   return (
     <main>
@@ -80,7 +81,20 @@ export default async function DatasetPage({
         <h1>{dataset.title}</h1>
         <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
           <p className="muted" style={{ margin: 0 }}>
-            <strong>{studyCitationLabel(dataset)}</strong>
+            <strong>
+              {paperHref ? (
+                <a
+                  href={paperHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "inherit", textDecoration: "underline" }}
+                >
+                  {studyCitationLabel(dataset)}
+                </a>
+              ) : (
+                studyCitationLabel(dataset)
+              )}
+            </strong>
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
@@ -143,7 +157,13 @@ export default async function DatasetPage({
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>Whole-Cell Boundary</div>
-                <div style={{ fontSize: "1.1rem" }}>{dataset.whole_cell_boundary_confirmed}</div>
+                <div style={{ fontSize: "1.1rem" }}>
+                  {dataset.whole_cell_boundary_confirmed === "yes"
+                    ? "Confirmed"
+                    : dataset.whole_cell_boundary_confirmed === "no"
+                      ? "Not confirmed"
+                      : "Unclear"}
+                </div>
               </div>
             </div>
           </section>

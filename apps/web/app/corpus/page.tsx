@@ -8,7 +8,7 @@ import { FacetBar } from "../../components/facet-bar";
 import { getCompare, getDatasets, pickExampleCompareIds } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
 import { ResultSummary } from "../../components/result-summary";
-import { publicationHref, publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
+import { publicationHref, publicDataHref, publicDataShortLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 import type { CompareResponse, SearchResponse } from "../../lib/types";
 
@@ -137,8 +137,8 @@ export default async function CorpusPage({
         </section>
 
         <FacetBar
-          title="Most Common Traits in This Slice"
-          description="A quick snapshot of the active result set. Click a trait to narrow the corpus to that subset."
+          title="Commonality Snapshot"
+          description="A quick reading of the active result set. Click a trait to narrow the corpus to that subset; this is a frequency snapshot, not a quality ranking."
           items={[
             {
               label: `datasets: ${searchResponse.total}`,
@@ -286,7 +286,7 @@ export default async function CorpusPage({
                 {searchResponse.results.map((d) => {
                   const paperHref = publicationHref(d);
                   const dataHref = publicDataHref(d);
-                  const publicLabel = publicDataLabel(d).replace("Data Publicly Available: ", "");
+                  const publicLabel = publicDataShortLabel(d);
 
                   return (
                     <tr key={d.dataset_id}>

@@ -5,11 +5,25 @@ type Props = {
   payload: CompareResponse;
 };
 
+const fieldLabels: Record<string, string> = {
+  cell_types: "Cell Type",
+  species: "Species",
+  organelles: "Organelles",
+  organelle_pairs: "Organelle Pairs",
+  metric_families: "Metric Families",
+  comparator_classes: "Comparator / Condition",
+  modality_families: "Modality Family",
+  modalities: "Modality",
+  sample_size_buckets: "Sample Size Band",
+  public_data_statuses: "Public Data Status",
+  boundary_confirmation: "Boundary Confirmation"
+};
+
 export function CompareSummary({ payload }: Props) {
   return (
     <section className="panel compare-card">
       <div className="kicker">Compare Mode Preview</div>
-      <h3>Example Compare Summary</h3>
+      <h3>Comparison Summary</h3>
       <p className="muted">{payload.summary}</p>
 
       <div className="summary-grid">
@@ -18,7 +32,7 @@ export function CompareSummary({ payload }: Props) {
           <div className="key-value-list">
             {Object.entries(payload.shared_fields).map(([key, values]) => (
               <span key={key} className="pill">
-                {key}: {values.length ? values.join(", ") : "none"}
+                {fieldLabels[key] ?? key}: {values.length ? values.join(", ") : "none"}
               </span>
             ))}
           </div>
@@ -29,7 +43,7 @@ export function CompareSummary({ payload }: Props) {
           <div className="key-value-list">
             {Object.entries(payload.key_differences).map(([key, values]) => (
               <span key={key} className="pill">
-                {key}: {values.join(", ")}
+                {fieldLabels[key] ?? key}: {values.join(", ")}
               </span>
             ))}
           </div>

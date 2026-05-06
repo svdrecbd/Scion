@@ -30,7 +30,7 @@ const screenCards = [
   {
     title: "Compare",
     href: "/compare",
-    copy: "Use after you have candidate datasets and want to inspect where they align or diverge."
+    copy: "Selection starts in Corpus. Use Compare after you have candidate datasets and want to inspect where they align or diverge."
   },
   {
     title: "Analytics",

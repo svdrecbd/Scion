@@ -3,7 +3,7 @@ import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { getExperimentPlan, getFacets } from "../../lib/api";
-import { publicDataHref, publicDataLabel, publicationHref, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
+import { publicDataHref, publicDataShortLabel, publicationHref, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 import type { DatasetRecord, FacetResponse, PlanAnalysis } from "../../lib/types";
 
@@ -430,7 +430,7 @@ function PrecedentTable({ records }: { records: DatasetRecord[] }) {
           {records.map((record) => {
             const paperHref = publicationHref(record);
             const dataHref = publicDataHref(record);
-            const publicLabel = publicDataLabel(record).replace("Data Publicly Available: ", "");
+            const publicLabel = publicDataShortLabel(record);
 
             return (
               <tr key={record.dataset_id}>

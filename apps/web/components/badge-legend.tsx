@@ -1,7 +1,7 @@
 const badgeItems = [
   {
     label: "Res",
-    description: "Resolution values are reported."
+    description: "Three-dimensional voxel size is reported."
   },
   {
     label: "SS",
@@ -9,11 +9,11 @@ const badgeItems = [
   },
   {
     label: "Boundary",
-    description: "Whole-cell boundary is confirmed."
+    description: "Whole-cell boundary confirmation is present."
   },
   {
     label: "Public Data",
-    description: "Reusable public data is known to exist."
+    description: "A reusable public-data locator is known to exist."
   },
   {
     label: "Borderline",

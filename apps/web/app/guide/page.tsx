@@ -5,7 +5,7 @@ const badges = [
   {
     label: "Res",
     className: "pill badge-verify",
-    copy: "Resolution is explicitly reported."
+    copy: "Three-dimensional voxel size is explicitly reported."
   },
   {
     label: "SS",
@@ -15,12 +15,12 @@ const badges = [
   {
     label: "Boundary",
     className: "pill badge-verify",
-    copy: "Whole-cell boundary confirmation is present."
+    copy: "Whole-cell boundary confirmation is present in the source record."
   },
   {
     label: "Public Data",
     className: "pill badge-public",
-    copy: "Reusable public data is known to exist."
+    copy: "A reusable public-data locator is known to exist."
   },
   {
     label: "Borderline",
@@ -48,8 +48,9 @@ export default function GuidePage() {
           <p className="muted" style={{ margin: "0 0 14px", lineHeight: 1.7 }}>
             This is a ranking aid for likely overlap, not a claim that two studies are equivalent.
             It rewards shared biology and shared technical structure, then compresses that into a
-            quick reading. A high score means “look here first,” not “pool these records without
-            caveats.”
+            quick reading. A high score means "look here first," not "pool these records without
+            caveats." In practice, read it as a banded signal rather than a precise scientific
+            measurement.
           </p>
           <div style={{ display: "grid", gap: 8 }}>
             <div className="muted" style={{ fontSize: "0.95rem" }}>
@@ -76,7 +77,8 @@ export default function GuidePage() {
           <h2 className="section-title">Metadata Completeness</h2>
           <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
             This measures how fully a record reports standardized fields such as modality,
-            resolution, sample size, and curation status. It is not a scientific-quality score.
+            resolution, sample size, and curation status. It is not a scientific-quality score,
+            and it should be read as a reporting-completeness aid rather than a merit ranking.
           </p>
           <div className="muted" style={{ display: "grid", gap: 6, lineHeight: 1.6, marginTop: 14 }}>
             <div><strong>+20%</strong> identity fields present in the seed record</div>

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { DatasetRecord } from "../lib/types";
-import { publicationHref, publicDataHref, publicDataLabel, studyCitationLabel } from "../lib/display";
+import { publicationHref, publicDataHref, publicDataLabel, publicDataShortLabel, studyCitationLabel } from "../lib/display";
 import { CompareToggle } from "./compare-toggle";
 
 type Props = {
@@ -26,7 +26,20 @@ export function DatasetCard({ dataset }: Props) {
       <Link href={`/datasets/${dataset.dataset_id}`} className="dataset-card-link" style={{ flex: 1 }}>
         <h3>{dataset.title}</h3>
         <p className="muted" style={{ marginBottom: 16 }}>
-          {studyCitationLabel(dataset)} · {dataset.modality}
+          {paperHref ? (
+            <a
+              href={paperHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "inherit", textDecoration: "underline" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {studyCitationLabel(dataset)}
+            </a>
+          ) : (
+            studyCitationLabel(dataset)
+          )}{" "}
+          · {dataset.modality}
         </p>
 
         <div className="panel-grid" style={{ gap: 12, marginBottom: 16 }}>
@@ -41,7 +54,7 @@ export function DatasetCard({ dataset }: Props) {
             )}
             {isPublic && (
               <span className="pill badge-public" title={publicDataLabel(dataset)}>
-                Data: {publicDataLabel(dataset).replace("Data Publicly Available: ", "")}
+                Public Data: {publicDataShortLabel(dataset)}
               </span>
             )}
           </div>

@@ -229,8 +229,8 @@ export default async function AnalyticsPage({
             <h2 className="section-title">The Imaging Toolkit</h2>
             <p className="muted">
               Which modalities are most commonly used for different biological targets in this
-              corpus. Organelle names follow the source corpus terminology, including niche
-              structures.
+              corpus. Organelle names follow the source corpus terminology, including specialized
+              structures that may only appear in a narrow biological context.
             </p>
           </div>
           <div className="figure-number">Plate A02</div>

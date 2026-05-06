@@ -47,10 +47,14 @@ export function publicDataHref(dataset: DatasetDisplayFields) {
   return dataset.public_locator_urls?.[0] ?? null;
 }
 
+export function publicDataShortLabel(dataset: DatasetDisplayFields) {
+  if (dataset.public_data_status === "complete") return "Complete";
+  if (dataset.public_data_status === "partial") return "Partial";
+  return "None indexed";
+}
+
 export function publicDataLabel(dataset: DatasetDisplayFields) {
-  if (dataset.public_data_status === "complete") return "Data Publicly Available: Complete";
-  if (dataset.public_data_status === "partial") return "Data Publicly Available: Partial";
-  return "Data Publicly Available: Not Indexed";
+  return `Data Publicly Available: ${publicDataShortLabel(dataset)}`;
 }
 
 export function voxelSizeLabel(dataset: DatasetDisplayFields) {
@@ -59,10 +63,10 @@ export function voxelSizeLabel(dataset: DatasetDisplayFields) {
   }
 
   if (dataset.axial_resolution_nm === null || dataset.axial_resolution_nm === undefined) {
-    return `${dataset.lateral_resolution_nm} nm XY voxel`;
+    return `${dataset.lateral_resolution_nm} nm voxel size (XY)`;
   }
 
-  return `${dataset.lateral_resolution_nm} x ${dataset.axial_resolution_nm} nm voxel (XY/Z)${
+  return `${dataset.lateral_resolution_nm} x ${dataset.axial_resolution_nm} nm voxel size (XY/Z, 3D)${
     dataset.isotropic ? " isotropic" : ""
   }`;
 }

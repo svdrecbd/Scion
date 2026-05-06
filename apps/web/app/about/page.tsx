@@ -20,19 +20,8 @@ const sourceLinks = [
 
 const feedbackEmail = "svdrecbd@gmail.com";
 const feedbackSubject = "Scion feedback or correction";
-const feedbackBody = [
-  "Page or record:",
-  "",
-  "Issue type: correction / missing data / UI confusion / feature request",
-  "",
-  "What should change:",
-  "",
-  "Source or evidence:",
-  "",
-  "May we follow up? yes / no",
-  ""
-].join("\n");
-const feedbackHref = `mailto:${feedbackEmail}?subject=${encodeURIComponent(feedbackSubject)}&body=${encodeURIComponent(feedbackBody)}`;
+const feedbackHref = `mailto:${feedbackEmail}?subject=${encodeURIComponent(feedbackSubject)}`;
+const corpusCitation = "Mirvis, M., Weingard, B., Goodman, S. et al. A scoping study of the whole-cell imaging literature as a foundation for the emerging field of cell anatomy. BMC Biol (2026). https://doi.org/10.1186/s12915-026-02556-0";
 
 const acknowledgementItems = [
   {
@@ -130,6 +119,17 @@ export default function AboutPage() {
         </div>
       </section>
 
+      <section className="panel" style={{ marginTop: 32 }}>
+        <h2 className="section-title">If You Use This Platform or Corpus</h2>
+        <p className="muted" style={{ margin: "0 0 16px", lineHeight: 1.7 }}>
+          Please cite the underlying scoping study that defined the starting corpus and inclusion
+          logic.
+        </p>
+        <p style={{ margin: 0, lineHeight: 1.7 }}>
+          {corpusCitation}
+        </p>
+      </section>
+
       <section className="panel-grid two" style={{ marginTop: 32 }}>
         <section className="panel feedback-panel">
           <div className="kicker">Feedback & Corrections</div>
@@ -157,6 +157,66 @@ export default function AboutPage() {
                 <p className="muted">{item.copy}</p>
               </section>
             ))}
+          </div>
+          <div style={{ display: "grid", gap: 18, marginTop: 18 }}>
+            <section>
+              <strong>Contact</strong>
+              <p className="muted" style={{ margin: "8px 0 0", lineHeight: 1.7 }}>
+                Mary Mirvis:{" "}
+                <a href="mailto:mariya.mirvis@ucsf.edu" style={{ textDecoration: "underline" }}>
+                  mariya.mirvis@ucsf.edu
+                </a>
+                {" "} / {" "}
+                <a href="mailto:mirvis.mary@gmail.com" style={{ textDecoration: "underline" }}>
+                  mirvis.mary@gmail.com
+                </a>
+                {" "} / {" "}
+                <a href="https://mary.mirv.is" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>
+                  mary.mirv.is
+                </a>
+              </p>
+              <p className="muted" style={{ margin: "8px 0 0", lineHeight: 1.7 }}>
+                Salvador Escobedo:{" "}
+                <a href="mailto:svdrecbd@gmail.com" style={{ textDecoration: "underline" }}>
+                  svdrecbd@gmail.com
+                </a>
+              </p>
+            </section>
+
+            <section>
+              <strong>Affiliation & Support</strong>
+              <p className="muted" style={{ margin: "8px 0 0", lineHeight: 1.7 }}>
+                Scientific work for the corpus is tied to the{" "}
+                <a
+                  href="https://biochemistry.ucsf.edu/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ textDecoration: "underline" }}
+                >
+                  Department of Biochemistry and Biophysics at UCSF
+                </a>
+                {" "}and the{" "}
+                <a
+                  href="https://cellgeometry.ucsf.edu/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ textDecoration: "underline" }}
+                >
+                  Wallace F. Marshall Lab
+                </a>.
+              </p>
+              <p className="muted" style={{ margin: "8px 0 0", lineHeight: 1.7 }}>
+                The underlying work was supported by the{" "}
+                <a
+                  href="https://pbbr.ucsf.edu/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ textDecoration: "underline" }}
+                >
+                  UCSF Sandler Program for Breakthrough Biomedical Research
+                </a>.
+              </p>
+            </section>
           </div>
         </section>
       </section>

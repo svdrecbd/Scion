@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { getCompare } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
-import { publicDataHref, publicDataLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
+import { publicDataHref, publicDataShortLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 
 export default async function ComparePage({
@@ -25,7 +25,8 @@ export default async function ComparePage({
           <h1>Compare Mode</h1>
           <p>
             Compare starts in the corpus. Select two or more datasets from either the table or card
-            view, then return here to inspect where they align and where they do not.
+            view, then return here to inspect where they align, where they diverge, and whether the
+            comparison is genuinely cross-study or still within one paper.
           </p>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
             <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
@@ -173,7 +174,7 @@ export default async function ComparePage({
               <th>Data Publicly Available</th>
               {payload.datasets.map((d) => {
                 const dataHref = publicDataHref(d);
-                const label = publicDataLabel(d).replace("Data Publicly Available: ", "");
+                const label = publicDataShortLabel(d);
 
                 return (
                   <td key={d.dataset_id}>
