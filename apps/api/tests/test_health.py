@@ -1,3 +1,4 @@
+import csv
 import os
 
 from fastapi.testclient import TestClient
@@ -80,52 +81,52 @@ def test_similar_and_plan_endpoints_work_with_in_memory_repository(client: TestC
 
 class BrokenDatasetRepository:
     def search_datasets(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def list_datasets(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_search_commonalities(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_dataset(self, dataset_id: str):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_datasets_by_ids(self, dataset_ids: list[str]):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_cross_tab(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_frontier_data(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_toolkit_matrix(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_measurement_grammar(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_reusability_map(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_coverage_atlas(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_corpus_timeline(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_benchmarks(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_facets(self, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def get_similar_datasets(self, *args, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
     def list_plan_datasets(self, *args, **kwargs):
-        raise DatabaseUnavailableError("Scion database is unavailable.")
+        raise DatabaseUnavailableError("The corpus database is unavailable.")
 
 
 def test_dataset_endpoints_return_503_when_database_is_unavailable(client: TestClient) -> None:
@@ -140,7 +141,7 @@ def test_dataset_endpoints_return_503_when_database_is_unavailable(client: TestC
 
     assert response.status_code == 503
     assert response.json() == {
-        "detail": "Scion database is unavailable.",
+        "detail": "The corpus database is unavailable.",
         "request_id": "db-down-test",
     }
     assert response.headers["x-request-id"] == "db-down-test"
@@ -194,7 +195,7 @@ def test_export_endpoint_returns_429_when_export_slot_is_busy(
     assert response.status_code == 429
     assert response.headers["retry-after"] == "7"
     assert response.json() == {
-        "detail": "Scion export capacity is saturated. Retry shortly.",
+        "detail": "Export capacity is saturated. Retry shortly.",
         "request_id": "export-busy-test",
     }
 
@@ -222,6 +223,85 @@ def test_analytics_endpoint_returns_429_when_slot_is_busy(
     assert response.status_code == 429
     assert response.headers["retry-after"] == "9"
     assert response.json() == {
-        "detail": "Scion analytics capacity is saturated. Retry shortly.",
+        "detail": "Analytics capacity is saturated. Retry shortly.",
         "request_id": "analytics-busy-test",
     }
+
+
+def test_beta_signup_endpoint_appends_private_csv(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    signup_path = tmp_path / "beta-signups.csv"
+    monkeypatch.setenv("SCION_BETA_SIGNUP_CSV_PATH", str(signup_path))
+    get_settings.cache_clear()
+
+    try:
+        response = client.post(
+            "/api/beta-signups",
+            json={
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "affiliation": "=Analytical Engine Lab",
+                "email": "ADA@Example.ORG",
+                "source_path": "/plan?organelles=nucleus",
+                "consent_text_version": "beta-interest-v1",
+            },
+            headers={REQUEST_ID_HEADER: "signup-test"},
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert response.status_code == 201
+    assert response.json() == {"status": "ok"}
+    assert response.headers["x-request-id"] == "signup-test"
+
+    with signup_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 1
+    assert rows[0]["Email"] == "ada@example.org"
+    assert rows[0]["First Name"] == "Ada"
+    assert rows[0]["Last Name"] == "Lovelace"
+    assert rows[0]["Affiliation"] == "'=Analytical Engine Lab"
+    assert rows[0]["Source Path"] == "/plan?organelles=nucleus"
+    assert rows[0]["Consent Text Version"] == "beta-interest-v1"
+    assert rows[0]["Created At"]
+
+
+def test_beta_signup_endpoint_requires_valid_email(client: TestClient) -> None:
+    response = client.post(
+        "/api/beta-signups",
+        json={
+            "first_name": "Ada",
+            "email": "not-an-email",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_beta_signup_honeypot_returns_ok_without_writing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    signup_path = tmp_path / "beta-signups.csv"
+    monkeypatch.setenv("SCION_BETA_SIGNUP_CSV_PATH", str(signup_path))
+    get_settings.cache_clear()
+
+    try:
+        response = client.post(
+            "/api/beta-signups",
+            json={
+                "email": "ada@example.org",
+                "website": "https://example.test",
+            },
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert response.status_code == 201
+    assert response.json() == {"status": "ok"}
+    assert not signup_path.exists()

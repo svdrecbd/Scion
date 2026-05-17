@@ -1,12 +1,16 @@
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 PublicDataStatus = Literal["none", "partial", "complete"]
 SourceType = Literal["paper", "repository", "internal"]
 ModalityFamily = Literal["EM", "X-ray", "optical", "other"]
 BoundaryStatus = Literal["yes", "no", "unclear"]
+SignupStatus = Literal["ok"]
+
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class DatasetRecord(BaseModel):
@@ -75,3 +79,39 @@ class CompareResponse(BaseModel):
     key_differences: dict[str, list[str]]
     comparability_score: int = Field(ge=0, le=100)
     summary: str
+
+
+class BetaSignupRequest(BaseModel):
+    first_name: str | None = Field(default=None, max_length=80)
+    last_name: str | None = Field(default=None, max_length=80)
+    affiliation: str | None = Field(default=None, max_length=160)
+    email: str = Field(min_length=3, max_length=254)
+    source_path: str | None = Field(default=None, max_length=300)
+    consent_text_version: str = Field(default="beta-interest-v1", max_length=40)
+    website: str | None = Field(default=None, max_length=200)
+
+    @field_validator("first_name", "last_name", "affiliation", "source_path", "website", mode="before")
+    @classmethod
+    def blank_optional_to_none(cls, value):
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @field_validator("consent_text_version", mode="before")
+    @classmethod
+    def normalize_consent_version(cls, value):
+        normalized = str(value or "").strip()
+        return normalized or "beta-interest-v1"
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not EMAIL_RE.match(normalized):
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+
+class BetaSignupResponse(BaseModel):
+    status: SignupStatus

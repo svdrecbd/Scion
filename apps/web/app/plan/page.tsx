@@ -1,6 +1,7 @@
 import React from "react";
 import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
+import { CopyTextButton } from "../../components/copy-text-button";
 import { DegradedStatusBanner } from "../../components/degraded-status-banner";
 import { getExperimentPlan, getFacets } from "../../lib/api";
 import { publicDataHref, publicDataShortLabel, publicationHref, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
@@ -76,12 +77,25 @@ export default async function PlanPage({
   ].filter(Boolean) as Array<{ label: string; context: string; error: unknown }>;
 
   const precedentQuery = resolvedSearchParams.precedent_query || "";
+  const precedentPublic = resolvedSearchParams.precedent_public || "";
   const precedentSort = resolvedSearchParams.precedent_sort || "year_desc";
   const displayedPrecedents = analysis
-    ? sortPrecedents(filterPrecedents(analysis.precedents, precedentQuery), precedentSort)
+    ? sortPrecedents(
+        filterPrecedents(
+          filterPrecedentsByPublicData(analysis.precedents, precedentPublic),
+          precedentQuery
+        ),
+        precedentSort
+      )
     : [];
-  const pmids = analysis ? unique(analysis.precedents.map((record) => record.publication_pmid).filter(Boolean) as string[]) : [];
-  const planExportHref = `/api/datasets/analytics/plan/export${buildQueryString(planParams)}`;
+  const pmids = unique(displayedPrecedents.map((record) => record.publication_pmid).filter(Boolean) as string[]);
+  const pmidList = pmids.join("\n");
+  const planExportHref = `/api/datasets/analytics/plan/export${buildQueryString({
+    ...planParams,
+    precedent_query: precedentQuery,
+    precedent_public: precedentPublic,
+    precedent_sort: precedentSort
+  })}`;
   const pubmedHref = pmids.length > 0
     ? `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(pmids.join(","))}`
     : null;
@@ -197,11 +211,11 @@ export default async function PlanPage({
                     <div>
                       <h2 className="section-title">Full Precedent List</h2>
                       <p className="muted" style={{ margin: 0 }}>
-                        {displayedPrecedents.length} of {analysis.precedents.length} records shown.
+                        {displayedPrecedents.length} of {analysis.precedents.length} record-level precedents shown.
                       </p>
                     </div>
                     <a href={planExportHref} className="button" style={{ textDecoration: "none" }} download>
-                      Download CSV
+                      Download Visible CSV
                     </a>
                   </div>
 
@@ -212,11 +226,18 @@ export default async function PlanPage({
                       name="precedent_query"
                       defaultValue={precedentQuery}
                       className="search-input"
-                      placeholder="Filter precedent table..."
+                      placeholder="Filter visible records..."
                     />
+                    <select name="precedent_public" defaultValue={precedentPublic} className="search-input">
+                      <option value="">Any public-data state</option>
+                      <option value="complete">Complete public data</option>
+                      <option value="partial">Partial public data</option>
+                      <option value="none">No indexed public data</option>
+                    </select>
                     <select name="precedent_sort" defaultValue={precedentSort} className="search-input">
                       <option value="year_desc">Newest First</option>
                       <option value="year_asc">Oldest First</option>
+                      <option value="author_asc">First Author A-Z</option>
                       <option value="sample_desc">Largest Sample</option>
                       <option value="res_asc">Finest Resolution</option>
                       <option value="public_first">Public Data First</option>
@@ -233,13 +254,17 @@ export default async function PlanPage({
                   <h2 className="section-title">PMID List</h2>
                   {pmids.length > 0 ? (
                     <>
+                      <p className="muted" style={{ marginTop: 0, marginBottom: 12 }}>
+                        Unique PMIDs from the currently displayed precedent rows.
+                      </p>
                       <textarea
                         readOnly
-                        value={pmids.join(",")}
+                        value={pmidList}
                         className="search-input"
                         style={{ width: "100%", minHeight: 96, resize: "vertical", fontFamily: "monospace" }}
                       />
                       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+                        <CopyTextButton text={pmidList} label="Copy PMID List" />
                         {pubmedHref ? (
                           <a href={pubmedHref} target="_blank" rel="noopener noreferrer" className="button" style={{ textDecoration: "none" }}>
                             Open PubMed Search
@@ -259,7 +284,12 @@ export default async function PlanPage({
                     {analysis.suggested_baselines.length > 0 ? (
                       analysis.suggested_baselines.map((record: DatasetRecord) => (
                         <Link key={record.dataset_id} href={`/datasets/${record.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "12px" }}>
-                          <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{studyCitationLabel(record)} · {record.cell_type}</div>
+                          <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>
+                            {studyCitationLabel(record)}
+                            {record.publication_pmid ? ` · PMID ${record.publication_pmid}` : ""}
+                            {" · "}
+                            {record.cell_type}
+                          </div>
                           <div style={{ fontWeight: 500, fontSize: "0.95rem" }}>{record.title}</div>
                           <div className="pill pill-link" style={{ marginTop: 8, textAlign: "center", fontSize: "0.8rem" }}>
                             Open Record
@@ -416,7 +446,7 @@ function PrecedentTable({ records }: { records: DatasetRecord[] }) {
       <table className="analytics-matrix plan-precedent-table">
         <thead>
           <tr>
-            <th>Study</th>
+            <th>Record</th>
             <th>PMID</th>
             <th>Cell Type</th>
             <th>Modality</th>
@@ -451,6 +481,7 @@ function PrecedentTable({ records }: { records: DatasetRecord[] }) {
                     ) : (
                       studyCitationLabel(record)
                     )}
+                    {record.publication_pmid ? ` · PMID ${record.publication_pmid}` : ""}
                   </div>
                 </td>
                 <td>
@@ -543,12 +574,23 @@ function filterPrecedents(records: DatasetRecord[], query: string) {
   });
 }
 
+function filterPrecedentsByPublicData(records: DatasetRecord[], publicState: string) {
+  if (!publicState) return records;
+  return records.filter((record) => record.public_data_status === publicState);
+}
+
 function sortPrecedents(records: DatasetRecord[], sortKey: string) {
   const sorted = [...records];
   sorted.sort((left, right) => {
     switch (sortKey) {
       case "year_asc":
         return left.year - right.year || left.dataset_id.localeCompare(right.dataset_id);
+      case "author_asc":
+        return (
+          precedentAuthorKey(left).localeCompare(precedentAuthorKey(right)) ||
+          right.year - left.year ||
+          left.dataset_id.localeCompare(right.dataset_id)
+        );
       case "sample_desc":
         return (right.sample_size ?? -1) - (left.sample_size ?? -1) || right.year - left.year;
       case "res_asc":
@@ -561,6 +603,17 @@ function sortPrecedents(records: DatasetRecord[], sortKey: string) {
     }
   });
   return sorted;
+}
+
+function precedentAuthorKey(record: DatasetRecord) {
+  const author = (record.source_study_id || "")
+    .replace(/\b(19|20)\d{2}\b/g, "")
+    .replace(/\bet\s+al\.?/i, "")
+    .replace(/[,\s]+$/g, "")
+    .trim()
+    .split(/\s+/)[0];
+
+  return (author || record.dataset_id).toLowerCase();
 }
 
 function publicRank(status: DatasetRecord["public_data_status"]) {

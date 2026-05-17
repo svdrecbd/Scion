@@ -38,8 +38,8 @@ export function DatasetCard({ dataset }: Props) {
             </a>
           ) : (
             studyCitationLabel(dataset)
-          )}{" "}
-          · {dataset.modality}
+          )}
+          {dataset.publication_pmid ? ` · PMID ${dataset.publication_pmid}` : ""} · {dataset.modality}
         </p>
 
         <div className="panel-grid" style={{ gap: 12, marginBottom: 16 }}>

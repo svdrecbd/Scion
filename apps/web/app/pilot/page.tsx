@@ -13,8 +13,8 @@ export default async function PilotPage() {
           <div className="kicker">Public Data Pilot</div>
           <h1>Pilot Browser Disabled</h1>
           <p>
-            The public-data pilot browser is disabled in production unless
-            `SCION_ENABLE_PUBLIC_DATA_PILOT=true` is set.
+            The public-data pilot browser is disabled in production unless the pilot runtime flag
+            is enabled.
           </p>
         </section>
       </main>
@@ -50,7 +50,7 @@ export default async function PilotPage() {
           {" "}
           <code>{getPilotRoot()}</code>
           {" "}
-          and does not move raw data into the Scion repo.
+          and does not move raw data into the project repo.
         </p>
       </section>
 

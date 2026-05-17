@@ -9,7 +9,7 @@ const fieldLabels: Record<string, string> = {
   cell_types: "Cell Type",
   species: "Species",
   organelles: "Organelles",
-  organelle_pairs: "Organelle Pairs",
+  organelle_pairs: "Derived Organelle Pairs",
   metric_families: "Metric Families",
   comparator_classes: "Comparator / Condition",
   modality_families: "Modality Family",
@@ -20,11 +20,28 @@ const fieldLabels: Record<string, string> = {
 };
 
 export function CompareSummary({ payload }: Props) {
+  const studyGroups = payload.datasets.reduce<Record<string, string[]>>((acc, dataset) => {
+    const key = dataset.source_study_id || dataset.dataset_id;
+    acc[key] = acc[key] || [];
+    acc[key].push(dataset.dataset_id);
+    return acc;
+  }, {});
+
+  const repeatedStudies = Object.entries(studyGroups).filter(([, ids]) => ids.length > 1);
+
   return (
     <section className="panel compare-card">
       <div className="kicker">Compare Mode Preview</div>
       <h3>Comparison Summary</h3>
       <p className="muted">{payload.summary}</p>
+
+      {repeatedStudies.length > 0 ? (
+        <p className="muted" style={{ marginTop: 12, lineHeight: 1.6 }}>
+          This selection includes multiple dataset records from the same paper:{" "}
+          {repeatedStudies.map(([studyId]) => studyId).join(", ")}. Treat the result as an
+          within-study alignment check, not independent cross-study validation.
+        </p>
+      ) : null}
 
       <div className="summary-grid">
         <div>

@@ -1,15 +1,16 @@
 "use client";
 
 import React, { useState } from "react";
+import { studyCitationLabel } from "../lib/display";
 import type { DatasetRecord } from "../lib/types";
 
 export function CitationButton({ dataset }: { dataset: DatasetRecord }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    const studyLabel = dataset.source_study_id ? `${dataset.source_study_id}. ` : "";
     const pmid = dataset.publication_pmid ? ` PMID: ${dataset.publication_pmid}.` : "";
-    const citation = `${studyLabel}"${dataset.paper_title}." ${dataset.source}. ${dataset.year}.${pmid} Indexed in Scion.`;
+    const publicationUrl = dataset.source_publication_url ? ` ${dataset.source_publication_url}` : "";
+    const citation = `${studyCitationLabel(dataset)}. "${dataset.paper_title}."${pmid} Indexed in the Cell Anatomy Corpus.${publicationUrl}`;
     navigator.clipboard.writeText(citation);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);

@@ -68,9 +68,9 @@ export default async function LandingPage({
         <div className="kicker">Whole-Cell Imaging Atlas</div>
         <h1>Find Precedent, Compare Datasets, and Map the Structure of the Field.</h1>
         <p>
-          Scion is a structured lookup and comparison layer for whole-cell imaging studies. It is
-          meant to help you find relevant records fast, understand how they were reported, and see
-          where the literature is strong, thin, or hard to compare directly.
+          The Cell Anatomy Corpus is a structured lookup and comparison layer for whole-cell
+          imaging studies. It is meant to help you find relevant records fast, understand how they
+          were reported, and see where the literature is strong, thin, or hard to compare directly.
         </p>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
           <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
@@ -86,7 +86,7 @@ export default async function LandingPage({
       </section>
 
       <section className="panel" style={{ marginTop: 32 }}>
-        <div className="kicker" style={{ margin: 0 }}>What Scion helps you do</div>
+        <div className="kicker" style={{ margin: 0 }}>What the Corpus Helps You Do</div>
         <div
           style={{
             display: "grid",
@@ -126,7 +126,7 @@ export default async function LandingPage({
             </p>
             <p className="muted" style={{ margin: 0 }}>
               <strong>Public Data Status</strong>: tells you whether reusable data is known to
-              exist, not whether Scion already mirrors it.
+              exist, not whether the corpus already mirrors it.
             </p>
             <p className="muted" style={{ margin: 0 }}>
               <strong>Metadata Completeness</strong>: measures reporting completeness, not
@@ -169,8 +169,9 @@ export default async function LandingPage({
         <section className="panel">
           <h2 className="section-title">Interpretation Warning</h2>
           <p className="muted" style={{ margin: 0, lineHeight: 1.7 }}>
-            Scion is designed to help you find and compare records faster. It is not meant to make
-            the literature seem more certain than it is. When a record matters, read the paper.
+            The Cell Anatomy Corpus is designed to help you find and compare records faster. It is
+            not meant to make the literature seem more certain than it is. When a record matters,
+            read the paper.
           </p>
         </section>
 
@@ -178,7 +179,7 @@ export default async function LandingPage({
           <h2 className="section-title">Need More Context?</h2>
           <p className="muted" style={{ margin: "0 0 16px", lineHeight: 1.7 }}>
             The about page holds the project context, source links, and the scoping-review
-            backbone that Scion is built from.
+            backbone behind the corpus.
           </p>
           <Link href="/about" className="muted" style={{ textDecoration: "underline" }}>
             Open About

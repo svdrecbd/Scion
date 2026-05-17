@@ -95,6 +95,7 @@ export default async function DatasetPage({
                 studyCitationLabel(dataset)
               )}
             </strong>
+            {dataset.publication_pmid ? ` · PMID ${dataset.publication_pmid}` : ""}
           </p>
           <div style={{ display: "flex", gap: "8px" }}>
             <Link
@@ -264,6 +265,10 @@ export default async function DatasetPage({
                   <Link key={s.dataset_id} href={`/datasets/${s.dataset_id}`} style={{ textDecoration: "none", display: "block", borderBottom: "1px solid var(--border)", paddingBottom: "8px" }}>
                     <div className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{s.cell_type}</div>
                     <div style={{ fontWeight: 500 }}>{s.title}</div>
+                    <div className="muted" style={{ fontSize: "0.8rem", marginTop: 4 }}>
+                      {studyCitationLabel(s)}
+                      {s.publication_pmid ? ` · PMID ${s.publication_pmid}` : ""}
+                    </div>
                   </Link>
                 ))}
               </div>
@@ -290,15 +295,16 @@ export default async function DatasetPage({
           {dataset.organelle_pairs.length > 0 && (
             <>
               <FacetBar
-                title="Captured Organelle Pairs"
+                title="Derived Organelle Pairs"
                 items={dataset.organelle_pairs.map((p) => ({
                   label: p,
                   href: `/corpus?pair=${encodeURIComponent(p)}`
                 }))}
+                description="These pairings are generated from the organelles listed on this record."
               />
               <p className="muted" style={{ margin: "-4px 0 0", fontSize: "0.85rem", lineHeight: 1.5 }}>
-                These pairs are derived from the organelles listed for this record. They should not
-                be read as proof that the study explicitly quantified contact sites.
+                They should not be read as proof that the study explicitly measured contact sites or
+                inter-organelle interactions.
               </p>
             </>
           )}

@@ -17,4 +17,4 @@ def get_connection() -> Iterator[Connection]:
         with connect(settings.database_url, row_factory=dict_row) as connection:
             yield connection
     except OperationalError as exc:
-        raise DatabaseUnavailableError("Scion database is unavailable.") from exc
+        raise DatabaseUnavailableError("The corpus database is unavailable.") from exc

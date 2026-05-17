@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ApiFailurePanel } from "../../components/api-failure-panel";
 import { getCompare } from "../../lib/api";
 import { CompareSummary } from "../../components/compare-summary";
-import { publicDataHref, publicDataShortLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
+import { publicationHref, publicDataHref, publicDataShortLabel, studyCitationLabel, voxelSizeLabel } from "../../lib/display";
 import { normalizeSearchParams, type RouteSearchParams } from "../../lib/route-props";
 
 export default async function ComparePage({
@@ -90,9 +90,14 @@ export default async function ComparePage({
       <section className="panel" style={{ marginTop: 24 }}>
         <h2 className="section-title">Dataset-Level Caveat</h2>
         <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
-          Scion compares dataset records, not always whole papers. A single study can contribute
-          multiple records for different cell types, modalities, or conditions, so same-study
-          comparisons may look more similar than true cross-study comparisons.
+          The comparison view uses dataset records, not always whole papers. A single study can
+          contribute multiple records for different cell types, modalities, or conditions, so
+          same-study comparisons may look more similar than true cross-study comparisons.
+        </p>
+        <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.6 }}>
+          Use this view to inspect alignment between specific records. If you need paper-level
+          precedent, follow the linked citations and PMIDs rather than assuming one row equals one
+          study.
         </p>
       </section>
 
@@ -105,16 +110,32 @@ export default async function ComparePage({
           <thead>
             <tr>
               <th>Feature</th>
-              {payload.datasets.map((d) => (
-                <th key={d.dataset_id}>
-                  <Link href={`/datasets/${d.dataset_id}`} style={{ textDecoration: "underline" }}>
-                    {d.title}
-                  </Link>
-                  <div className="muted" style={{ fontSize: "0.8rem", marginTop: 4 }}>
-                    {studyCitationLabel(d)}
-                  </div>
-                </th>
-              ))}
+              {payload.datasets.map((d) => {
+                const paperHref = publicationHref(d);
+
+                return (
+                  <th key={d.dataset_id}>
+                    <Link href={`/datasets/${d.dataset_id}`} style={{ textDecoration: "underline" }}>
+                      {d.title}
+                    </Link>
+                    <div className="muted" style={{ fontSize: "0.8rem", marginTop: 4 }}>
+                      {paperHref ? (
+                        <a
+                          href={paperHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "inherit", textDecoration: "underline" }}
+                        >
+                          {studyCitationLabel(d)}
+                        </a>
+                      ) : (
+                        studyCitationLabel(d)
+                      )}
+                      {d.publication_pmid ? ` · PMID ${d.publication_pmid}` : ""}
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>

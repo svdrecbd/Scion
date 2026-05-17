@@ -508,8 +508,8 @@ export default async function AnalyticsPage({
           />
         )}
         <p className="figure-caption">
-          Complete and partial both mean some reusable public data is known. None means Scion has
-          not indexed a reusable public-data locator for that organelle in the current corpus slice.
+          Complete and partial both mean some reusable public data is known. None means the corpus
+          has not indexed a reusable public-data locator for that organelle in the current slice.
         </p>
       </section>
 

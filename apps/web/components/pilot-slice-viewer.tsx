@@ -154,7 +154,7 @@ export function PilotSliceViewer({
     <section className="slice-viewer">
       <div className="slice-viewer-toolbar">
         <div>
-          <div className="kicker">Scion Slice Viewer</div>
+          <div className="kicker">Cell Anatomy Slice Viewer</div>
           <h1>{title}</h1>
           <p>{sourceRelativePath}</p>
         </div>

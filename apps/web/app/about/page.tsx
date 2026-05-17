@@ -9,7 +9,7 @@ const sourceLinks = [
   {
     label: "Cell-Anatomy-Scoping-Review repository",
     href: "https://github.com/mmirvis/Cell-Anatomy-Scoping-Review",
-    copy: "The source extraction and analysis repository Scion is built from."
+    copy: "The source extraction and analysis repository behind the Cell Anatomy Corpus."
   },
   {
     label: "Literature corpus query",
@@ -19,7 +19,7 @@ const sourceLinks = [
 ];
 
 const feedbackEmail = "svdrecbd@gmail.com";
-const feedbackSubject = "Scion feedback or correction";
+const feedbackSubject = "Cell Anatomy feedback or correction";
 const feedbackHref = `mailto:${feedbackEmail}?subject=${encodeURIComponent(feedbackSubject)}`;
 const corpusCitation = "Mirvis, M., Weingard, B., Goodman, S. et al. A scoping study of the whole-cell imaging literature as a foundation for the emerging field of cell anatomy. BMC Biol (2026). https://doi.org/10.1186/s12915-026-02556-0";
 
@@ -39,11 +39,11 @@ export default function AboutPage() {
     <main>
       <section className="hero">
         <div className="kicker">About</div>
-        <h1>What Scion Is Built From</h1>
+        <h1>What the Cell Anatomy Corpus Is Built From</h1>
         <p>
-          Scion is a structured interface over a manually curated whole-cell imaging corpus. It is
-          meant to make the literature easier to search, compare, and benchmark without pretending
-          the underlying studies are more uniform than they are.
+          The Cell Anatomy Corpus is a structured interface over a manually curated whole-cell
+          imaging corpus. It is meant to make the literature easier to search, compare, and
+          benchmark without pretending the underlying studies are more uniform than they are.
         </p>
       </section>
 
@@ -54,8 +54,8 @@ export default function AboutPage() {
             <div>
               <strong>Comparability over abstraction</strong>
               <p className="muted" style={{ margin: "8px 0 0" }}>
-                Scion tries to help you line records up honestly, not flatten the field into fake
-                equivalence.
+                The corpus tries to help you line records up honestly, not flatten the field into
+                fake equivalence.
               </p>
             </div>
             <div>
@@ -67,7 +67,7 @@ export default function AboutPage() {
             <div>
               <strong>The paper still wins</strong>
               <p className="muted" style={{ margin: "8px 0 0" }}>
-                Scion is an atlas and comparison layer, not a replacement for reading the source
+                This atlas is a comparison layer, not a replacement for reading the source
                 publication when a decision matters.
               </p>
             </div>

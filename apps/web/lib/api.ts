@@ -98,7 +98,7 @@ async function readJsonOrThrow<T>(path: string, init?: RequestInit): Promise<T> 
   } catch (error) {
     if (timedOut) {
       throw new ScionApiError({
-        message: `Scion API request timed out after ${timeoutMs}ms for ${path} [request_id=${requestId}]`,
+        message: `API request timed out after ${timeoutMs}ms for ${path} [request_id=${requestId}]`,
         kind: "timeout",
         path,
         requestId
@@ -107,7 +107,7 @@ async function readJsonOrThrow<T>(path: string, init?: RequestInit): Promise<T> 
 
     if (error instanceof Error && error.name === "AbortError") {
       throw new ScionApiError({
-        message: `Scion API request was aborted for ${path} [request_id=${requestId}]`,
+        message: `API request was aborted for ${path} [request_id=${requestId}]`,
         kind: "abort",
         path,
         requestId
@@ -116,7 +116,7 @@ async function readJsonOrThrow<T>(path: string, init?: RequestInit): Promise<T> 
 
     if (error instanceof Error) {
       throw new ScionApiError({
-        message: `Scion API request failed before a response for ${path}: ${error.message} [request_id=${requestId}]`,
+        message: `API request failed before a response for ${path}: ${error.message} [request_id=${requestId}]`,
         kind: "network",
         path,
         requestId
@@ -148,7 +148,7 @@ async function readJsonOrThrow<T>(path: string, init?: RequestInit): Promise<T> 
     }
 
     throw new ScionApiError({
-      message: `Scion API request failed: ${detail} for ${path} [request_id=${responseRequestId}]`,
+      message: `API request failed: ${detail} for ${path} [request_id=${responseRequestId}]`,
       kind: "http",
       path,
       requestId: responseRequestId,
@@ -256,7 +256,7 @@ export async function getSimilarDatasets(datasetId: string): Promise<DatasetReco
 
 export async function getCompare(datasetIds: string[]): Promise<CompareResponse> {
   if (datasetIds.length < 2) {
-    throw new Error("Scion compare requires at least two dataset ids.");
+    throw new Error("Compare requires at least two dataset ids.");
   }
 
   return readJsonOrThrow<CompareResponse>("/datasets/compare", {

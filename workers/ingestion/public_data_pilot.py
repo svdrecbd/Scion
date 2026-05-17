@@ -1062,7 +1062,7 @@ def write_preview_outputs(root_dir: Path, records: list[PreviewRecord]) -> tuple
     html_path.write_text(
         f"""<!doctype html>
 <meta charset="utf-8" />
-<title>Scion Public Data Pilot Preview</title>
+<title>Cell Anatomy Public Data Pilot Preview</title>
 <style>
   body {{ margin: 32px; background: #f3f0e8; color: #171717; font-family: Georgia, serif; }}
   h1 {{ font-family: Futura, Avenir Next, sans-serif; letter-spacing: .04em; }}
@@ -1073,7 +1073,7 @@ def write_preview_outputs(root_dir: Path, records: list[PreviewRecord]) -> tuple
   p {{ margin: 0; color: #555; }}
   .missing {{ min-height: 180px; display: grid; place-items: center; background: #ded9ce; color: #555; text-align: center; padding: 12px; }}
 </style>
-<h1>Scion Public Data Pilot Preview</h1>
+<h1>Cell Anatomy Public Data Pilot Preview</h1>
 <p>Dependency-light middle-slice previews generated from local volume data.</p>
 <div class="grid">{''.join(cards)}
 </div>
@@ -2221,7 +2221,7 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
     html_path.write_text(
         f"""<!doctype html>
 <meta charset="utf-8" />
-<title>Scion Public Data Pilot Index</title>
+<title>Cell Anatomy Public Data Pilot Index</title>
 <style>
   body {{ margin: 32px; background: #f3f0e8; color: #171717; font-family: Georgia, serif; }}
   h1 {{ font-family: Futura, Avenir Next, sans-serif; letter-spacing: .04em; }}
@@ -2230,7 +2230,7 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
   th {{ font-family: Futura, Avenir Next, sans-serif; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }}
   a {{ color: #087ea4; }}
 </style>
-<h1>Scion Public Data Pilot Index</h1>
+<h1>Cell Anatomy Public Data Pilot Index</h1>
 <p>Local audit view for mirrored public datasets before OME-Zarr conversion.</p>
 <table>
   <thead>

@@ -4,6 +4,7 @@ import { EB_Garamond } from "next/font/google";
 import { Navbar } from "../components/navbar";
 import { CompareProvider } from "../lib/compare-context";
 import { CompareDrawer } from "../components/compare-drawer";
+import { BetaSignupPrompt } from "../components/beta-signup-prompt";
 
 const ebGaramond = EB_Garamond({
   subsets: ["latin"],
@@ -12,7 +13,7 @@ const ebGaramond = EB_Garamond({
 });
 
 export const metadata: Metadata = {
-  title: "Scion",
+  title: "Cell Anatomy",
   description: "Cross-repository lookup and comparison for whole-cell imaging datasets.",
   icons: {
     icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><ellipse cx="12" cy="16" rx="8" ry="13" stroke="%23888" stroke-width="2" fill="none"/><ellipse cx="20" cy="16" rx="8" ry="13" stroke="%23888" stroke-width="2" fill="none"/></svg>',
@@ -27,6 +28,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   const showPilot = process.env.NODE_ENV !== "production" || process.env.SCION_ENABLE_PUBLIC_DATA_PILOT === "true";
+  const currentYear = new Date().getFullYear();
 
   return (
     <html lang="en" className={`${ebGaramond.className} ${ebGaramond.variable}`}>
@@ -39,7 +41,8 @@ export default function RootLayout({
           <Suspense fallback={null}>
             <CompareDrawer />
           </Suspense>
-          <footer>Scion – Ad Interiora.</footer>
+          <BetaSignupPrompt />
+          <footer>© {currentYear} General Cell Anatomy Group - Ad Interiora.</footer>
         </CompareProvider>
       </body>
     </html>

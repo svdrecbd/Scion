@@ -5,7 +5,7 @@ export default function NotFoundPage() {
     <main>
       <section className="hero">
         <div className="kicker">Not Found</div>
-        <h1>Scion could not find that record.</h1>
+        <h1>That record was not found.</h1>
         <p>
           The requested dataset may have been removed, renamed, or never existed in the seeded corpus.
         </p>

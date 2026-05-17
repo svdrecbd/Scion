@@ -32,7 +32,7 @@ def _guard_analytics_slot(slot_name: str):
     return pressure_guard(
         slot_name,
         limit=settings.analytics_slot_limit,
-        detail="Scion analytics capacity is saturated. Retry shortly.",
+        detail="Analytics capacity is saturated. Retry shortly.",
         retry_after_seconds=settings.busy_retry_after_seconds,
     )
 
@@ -42,7 +42,7 @@ def _guard_export_slot():
     return pressure_guard(
         "datasets.export",
         limit=settings.export_slot_limit,
-        detail="Scion export capacity is saturated. Retry shortly.",
+        detail="Export capacity is saturated. Retry shortly.",
         retry_after_seconds=settings.busy_retry_after_seconds,
     )
 
@@ -87,6 +87,98 @@ def _build_plan_analysis(
         include_borderline=True,
     )
     return organelle_list, datasets, analyze_experiment_plan(datasets, organelle_list, res, ss)
+
+
+def _plan_public_rank(status: str) -> int:
+    if status == "complete":
+        return 2
+    if status == "partial":
+        return 1
+    return 0
+
+
+def _plan_author_key(dataset: DatasetRecord) -> str:
+    source_study_id = dataset.source_study_id or ""
+    author = (
+        source_study_id.replace("et al.", "")
+        .replace("et al", "")
+        .strip()
+        .split(" ")[0]
+    )
+    return (author or dataset.dataset_id).lower()
+
+
+def _filter_plan_precedents_by_query(
+    precedents: list[DatasetRecord], precedent_query: str | None
+) -> list[DatasetRecord]:
+    normalized_query = (precedent_query or "").strip().lower()
+    if not normalized_query:
+        return precedents
+
+    filtered: list[DatasetRecord] = []
+    for dataset in precedents:
+        haystack = " ".join(
+            [
+                dataset.dataset_id,
+                dataset.source_study_id or "",
+                dataset.publication_pmid or "",
+                dataset.paper_title,
+                dataset.source,
+                dataset.cell_type,
+                dataset.species,
+                dataset.modality,
+                dataset.comparator_class or "",
+                dataset.comparator_detail or "",
+                " ".join(dataset.organelles),
+                " ".join(dataset.metric_families),
+            ]
+        ).lower()
+
+        if normalized_query in haystack:
+            filtered.append(dataset)
+
+    return filtered
+
+
+def _filter_plan_precedents_by_public_state(
+    precedents: list[DatasetRecord], precedent_public: str | None
+) -> list[DatasetRecord]:
+    if not precedent_public:
+        return precedents
+    return [
+        dataset for dataset in precedents if dataset.public_data_status == precedent_public
+    ]
+
+
+def _sort_plan_precedents(
+    precedents: list[DatasetRecord], precedent_sort: str | None
+) -> list[DatasetRecord]:
+    sort_key = precedent_sort or "year_desc"
+
+    def sort_tuple(dataset: DatasetRecord):
+        if sort_key == "year_asc":
+            return (dataset.year, dataset.dataset_id)
+        if sort_key == "author_asc":
+            return (_plan_author_key(dataset), -dataset.year, dataset.dataset_id)
+        if sort_key == "sample_desc":
+            return (-(dataset.sample_size or -1), -dataset.year, dataset.dataset_id)
+        if sort_key == "res_asc":
+            return (
+                dataset.lateral_resolution_nm
+                if dataset.lateral_resolution_nm is not None
+                else float("inf"),
+                -dataset.year,
+                dataset.dataset_id,
+            )
+        if sort_key == "public_first":
+            return (
+                -_plan_public_rank(dataset.public_data_status),
+                -dataset.year,
+                dataset.dataset_id,
+            )
+        return (-dataset.year, dataset.dataset_id)
+
+    return sorted(precedents, key=sort_tuple)
 
 
 @router.get("", response_model=SearchResponse)
@@ -240,7 +332,7 @@ def export_datasets(
                 entry += f"  year = {{{d.year}}},\n"
                 if d.publication_pmid:
                     entry += f"  pmid = {{{d.publication_pmid}}},\n"
-                entry += f"  note = {{Indexed in Scion: {d.title}}}\n"
+                entry += f"  note = {{Indexed in the Cell Anatomy Corpus: {d.title}}}\n"
                 entry += "}\n"
                 bib_entries.append(entry)
 
@@ -248,7 +340,7 @@ def export_datasets(
                 io.StringIO("\n".join(bib_entries)),
                 media_type="text/plain",
                 headers={
-                    "Content-Disposition": "attachment; filename=scion_export.bib",
+                    "Content-Disposition": "attachment; filename=cell_anatomy_corpus_export.bib",
                     "X-Scion-Export-Count": str(len(filtered)),
                     "X-Scion-Export-Limit": str(settings.export_max_rows),
                 },
@@ -313,7 +405,7 @@ def export_datasets(
             )
 
         output.seek(0)
-        filename = f"scion_export_{format}.{format}"
+        filename = f"cell_anatomy_corpus_export_{format}.{format}"
         response = StreamingResponse(
             output,
             media_type="text/csv",
@@ -702,6 +794,9 @@ def export_experiment_plan(
     metric_family: str | None = Query(default=None, alias="metric"),
     comparator_class: str | None = None,
     modality_family: str | None = Query(default=None, alias="family"),
+    precedent_query: str | None = None,
+    precedent_public: str | None = None,
+    precedent_sort: str | None = None,
     repository: DatasetRepository = Depends(get_dataset_repository),
 ):
     started_at = perf_counter()
@@ -719,13 +814,23 @@ def export_experiment_plan(
             modality_family=modality_family,
         )
 
-        if len(analysis.precedents) > settings.export_max_rows:
+        export_precedents = _sort_plan_precedents(
+            _filter_plan_precedents_by_query(
+                _filter_plan_precedents_by_public_state(
+                    analysis.precedents, precedent_public
+                ),
+                precedent_query,
+            ),
+            precedent_sort,
+        )
+
+        if len(export_precedents) > settings.export_max_rows:
             route_logger.warning(
                 "plan export rejected due to safety limit",
                 extra=with_request_context(
                     {
                         "event": "route_plan_export_rejected_limit",
-                        "requested_count": len(analysis.precedents),
+                        "requested_count": len(export_precedents),
                         "row_limit": settings.export_max_rows,
                     }
                 ),
@@ -760,7 +865,7 @@ def export_experiment_plan(
                 "Publication URL",
             ]
         )
-        for dataset in analysis.precedents:
+        for dataset in export_precedents:
             writer.writerow(
                 [
                     dataset.dataset_id,
@@ -790,15 +895,15 @@ def export_experiment_plan(
             output,
             media_type="text/csv",
             headers={
-                "Content-Disposition": "attachment; filename=scion_plan_precedents.csv",
-                "X-Scion-Export-Count": str(len(analysis.precedents)),
+                "Content-Disposition": "attachment; filename=cell_anatomy_plan_precedents.csv",
+                "X-Scion-Export-Count": str(len(export_precedents)),
                 "X-Scion-Export-Limit": str(settings.export_max_rows),
             },
         )
         _log_route_timing(
             "datasets.analytics.plan.export",
             started_at,
-            exported_count=len(analysis.precedents),
+            exported_count=len(export_precedents),
             organelle_count=len(organelle_list),
         )
         return response

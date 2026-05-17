@@ -34,7 +34,7 @@ export default function GuidePage() {
     <main>
       <section className="hero">
         <div className="kicker">Guide</div>
-        <h1>How to Interpret Scion</h1>
+        <h1>How to Interpret the Cell Anatomy Corpus</h1>
         <p>
           Use this page when you need the meaning of a score, badge, or status label. For general
           orientation, start from the landing page. For project context and source links, use

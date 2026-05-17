@@ -93,7 +93,7 @@ export function Navbar({ showPilot = false }: NavbarProps) {
         <div className="nav-title">
           <Link href="/" style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <Logo />
-            <span>Scion</span>
+            <span>Cell Anatomy</span>
           </Link>
         </div>
 

@@ -28,6 +28,7 @@ from app.observability import (
 from app.readiness import readiness_snapshot
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
+from app.routes.signups import router as signups_router
 
 configure_logging(get_settings().log_level)
 settings = get_settings()
@@ -80,7 +81,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="API for Scion, a structured lookup and comparison layer for whole-cell datasets.",
+    description="API for the Cell Anatomy Corpus, a structured lookup and comparison layer for whole-cell datasets.",
     lifespan=lifespan,
 )
 
@@ -139,6 +140,7 @@ app.add_middleware(
 
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(datasets_router, prefix=settings.api_prefix)
+app.include_router(signups_router, prefix=settings.api_prefix)
 
 
 def _error_payload(request: Request, detail: str) -> dict[str, str]:
@@ -205,4 +207,4 @@ def handle_export_limit(request: Request, exc: ExportLimitError) -> JSONResponse
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"message": "Scion API is running"}
+    return {"message": "Cell Anatomy API is running"}

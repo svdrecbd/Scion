@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import io
+
 from fastapi.testclient import TestClient
 
 from app.observability import REQUEST_ID_HEADER
@@ -213,6 +216,26 @@ def test_analytics_routes_use_seeded_postgres_aggregates(
     )
     assert plan_export_response.status_code == 200
     assert "PMID" in plan_export_response.text
+
+    filtered_plan_export_response = integration_client.get(
+        "/api/datasets/analytics/plan/export",
+        params={
+            "organelles": "nucleus,mitochondria",
+            "metric": "volume",
+            "precedent_public": "complete",
+            "precedent_sort": "year_asc",
+        },
+    )
+    assert filtered_plan_export_response.status_code == 200
+    filtered_rows = list(csv.DictReader(io.StringIO(filtered_plan_export_response.text)))
+    assert filtered_rows
+    assert all(row["Public Data Status"] == "complete" for row in filtered_rows)
+    assert [int(row["Year"]) for row in filtered_rows] == sorted(
+        int(row["Year"]) for row in filtered_rows
+    )
+    assert filtered_plan_export_response.headers["x-scion-export-count"] == str(
+        len(filtered_rows)
+    )
 
 
 def test_cross_tab_rejects_unsupported_dimensions(
