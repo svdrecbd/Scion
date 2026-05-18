@@ -1,6 +1,6 @@
-# Scion
+# Cell Anatomy
 
-Scion is a structured lookup and comparison layer for whole-cell imaging datasets. It acts as a specialized discovery engine for researchers to synthesize evidence across the structural organization of the cell.
+Cell Anatomy is a structured lookup and comparison layer for whole-cell imaging datasets. It acts as a specialized discovery engine for researchers to synthesize evidence across the structural organization of the cell.
 
 **“PubMed + compare mode for whole-cell datasets.”**
 
@@ -21,11 +21,11 @@ Researchers can usually find individual papers and repositories. What is still h
 - What are the achievable sample sizes for this modality?
 - Which datasets are actually comparable for a pooled analysis?
 
-Scion is meant to make those questions fast and metadata-native.
+Cell Anatomy is meant to make those questions fast and metadata-native.
 
 ## Quick start (Native macOS)
 
-Scion follows a "no-bloat" ethos and runs natively without Docker. Native Postgres is the only supported local database path.
+Cell Anatomy follows a "no-bloat" ethos and runs natively without Docker. Native Postgres is the only supported local database path.
 
 ```bash
 # 1. Install Postgres (if not already present)

@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, readdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 
@@ -30,6 +30,13 @@ export type PilotDatasetRecord = {
     sidecar_assets: number;
     status: string;
     target_format: string;
+  };
+  advisory?: {
+    total_findings: number;
+    public_notice_candidates: number;
+    by_severity?: Record<string, number>;
+    by_category?: Record<string, number>;
+    by_review_status?: Record<string, number>;
   };
 };
 
@@ -144,10 +151,77 @@ export type SliceCacheManifest = {
   }>;
 };
 
+export type AdvisoryFinding = {
+  finding_id: string;
+  dataset_slug: string;
+  asset_relative_path: string;
+  severity: string;
+  category: string;
+  code: string;
+  summary: string;
+  impact: string;
+  recommended_action: string;
+  public_notice_candidate: boolean;
+  review_status: string;
+  reviewed_at?: string;
+  reviewed_by?: string;
+  evidence: Array<{
+    source: string;
+    field: string;
+    value: unknown;
+  }>;
+};
+
+export type AdvisoryManifest = {
+  pipeline_version: string;
+  dataset: PilotDatasetRecord["dataset"];
+  dataset_slug: string;
+  generated_at: string;
+  scope: string;
+  summary: {
+    total_findings: number;
+    public_notice_candidates: number;
+    by_severity: Record<string, number>;
+    by_category: Record<string, number>;
+    by_review_status: Record<string, number>;
+  };
+  findings: AdvisoryFinding[];
+};
+
+export const PUBLIC_ADVISORY_REVIEW_STATUS = "approved_public";
+export const ADVISORY_REVIEW_STATUSES = [
+  "needs_human_review",
+  "approved_public",
+  "internal_only",
+  "dismissed",
+] as const;
+
+export type AdvisoryReviewStatus = typeof ADVISORY_REVIEW_STATUSES[number];
+
+export function publicAdvisoryFindings(advisory: AdvisoryManifest | null | undefined): AdvisoryFinding[] {
+  return (advisory?.findings ?? []).filter(
+    (finding) =>
+      finding.public_notice_candidate &&
+      finding.review_status === PUBLIC_ADVISORY_REVIEW_STATUS
+  );
+}
+
+export function publicAdvisoryCount(summary: PilotDatasetRecord["advisory"] | undefined): number {
+  return summary?.by_review_status?.[PUBLIC_ADVISORY_REVIEW_STATUS] ?? 0;
+}
+
+export function isAdvisoryReviewStatus(value: string): value is AdvisoryReviewStatus {
+  return (ADVISORY_REVIEW_STATUSES as readonly string[]).includes(value);
+}
+
 const DEFAULT_PUBLIC_DATA_ROOT = path.join(homedir(), "Downloads", "scion-public-data");
 
 export function isPilotEnabled(): boolean {
   return process.env.NODE_ENV !== "production" || process.env.SCION_ENABLE_PUBLIC_DATA_PILOT === "true";
+}
+
+export function isPilotReviewEnabled(): boolean {
+  return isPilotEnabled() && process.env.SCION_ENABLE_LOCAL_REVIEW_SUITE === "true";
 }
 
 export function getPilotRoot(): string {
@@ -213,6 +287,119 @@ export async function getSliceCacheManifest(slug: string): Promise<SliceCacheMan
   const relativePath = path.join(slug, "metadata", "slice-manifest.json");
   if (!existsSync(safePilotPath(relativePath))) return null;
   return readJson<SliceCacheManifest>(relativePath);
+}
+
+export async function getAdvisoryManifest(slug: string): Promise<AdvisoryManifest | null> {
+  if (!isPilotEnabled()) return null;
+  const relativePath = path.join(slug, "metadata", "advisory-findings.json");
+  if (!existsSync(safePilotPath(relativePath))) return null;
+  return readJson<AdvisoryManifest>(relativePath);
+}
+
+export type AdvisoryReviewItem = {
+  slug: string;
+  dataset: PilotDatasetRecord["dataset"];
+  finding: AdvisoryFinding;
+};
+
+function advisorySummaryFromFindings(findings: AdvisoryFinding[]): AdvisoryManifest["summary"] {
+  const bySeverity: Record<string, number> = {};
+  const byCategory: Record<string, number> = {};
+  const byReviewStatus: Record<string, number> = {};
+  let publicNoticeCandidates = 0;
+
+  for (const finding of findings) {
+    bySeverity[finding.severity] = (bySeverity[finding.severity] ?? 0) + 1;
+    byCategory[finding.category] = (byCategory[finding.category] ?? 0) + 1;
+    byReviewStatus[finding.review_status] = (byReviewStatus[finding.review_status] ?? 0) + 1;
+    if (finding.public_notice_candidate) publicNoticeCandidates += 1;
+  }
+
+  return {
+    total_findings: findings.length,
+    public_notice_candidates: publicNoticeCandidates,
+    by_severity: Object.fromEntries(Object.entries(bySeverity).sort()),
+    by_category: Object.fromEntries(Object.entries(byCategory).sort()),
+    by_review_status: Object.fromEntries(Object.entries(byReviewStatus).sort()),
+  };
+}
+
+export async function getAdvisoryReviewItems(): Promise<AdvisoryReviewItem[]> {
+  if (!isPilotReviewEnabled()) return [];
+
+  const root = getPilotRoot();
+  if (!existsSync(root)) return [];
+
+  const entries = await readdir(root, { withFileTypes: true });
+  const items: AdvisoryReviewItem[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const advisory = await getAdvisoryManifest(entry.name);
+    if (!advisory) continue;
+
+    for (const finding of advisory.findings) {
+      items.push({
+        slug: entry.name,
+        dataset: advisory.dataset,
+        finding,
+      });
+    }
+  }
+
+  return items.sort((left, right) =>
+    [
+      left.finding.review_status.localeCompare(right.finding.review_status),
+      left.finding.severity.localeCompare(right.finding.severity),
+      left.slug.localeCompare(right.slug),
+      left.finding.finding_id.localeCompare(right.finding.finding_id),
+    ].find((value) => value !== 0) ?? 0
+  );
+}
+
+async function updatePilotIndexAdvisorySummary(slug: string, summary: AdvisoryManifest["summary"]): Promise<void> {
+  const indexPath = safePilotPath("pilot-index.json");
+  if (!existsSync(indexPath)) return;
+
+  const index = JSON.parse(await readFile(indexPath, "utf8")) as PilotIndex;
+  const record = index.datasets.find((item) => item.slug === slug);
+  if (!record) return;
+
+  record.advisory = summary;
+  await writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+}
+
+export async function updateAdvisoryFindingReview({
+  slug,
+  findingId,
+  reviewStatus,
+  publicNoticeCandidate,
+}: {
+  slug: string;
+  findingId: string;
+  reviewStatus: AdvisoryReviewStatus;
+  publicNoticeCandidate: boolean;
+}): Promise<void> {
+  if (!isPilotReviewEnabled()) {
+    throw new Error("pilot_review_disabled");
+  }
+
+  const relativePath = path.join(slug, "metadata", "advisory-findings.json");
+  const manifestPath = safePilotPath(relativePath);
+  const advisory = JSON.parse(await readFile(manifestPath, "utf8")) as AdvisoryManifest;
+  const finding = advisory.findings.find((item) => item.finding_id === findingId);
+  if (!finding) {
+    throw new Error("advisory_finding_not_found");
+  }
+
+  finding.review_status = reviewStatus;
+  finding.public_notice_candidate = publicNoticeCandidate;
+  finding.reviewed_at = new Date().toISOString();
+  finding.reviewed_by = "local_review_suite";
+  advisory.summary = advisorySummaryFromFindings(advisory.findings);
+
+  await writeFile(manifestPath, `${JSON.stringify(advisory, null, 2)}\n`);
+  await updatePilotIndexAdvisorySummary(slug, advisory.summary);
 }
 
 export function pilotAssetHref(absolutePath: string): string {

@@ -2,15 +2,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   bytesToGiB,
+  getAdvisoryManifest,
   getConversionReadiness,
   getDerivativeManifest,
   getPilotIndex,
   getPreviewRecords,
   getSliceCacheManifest,
   pilotAssetHref,
+  publicAdvisoryFindings,
 } from "../../../lib/public-pilot";
 
 export const dynamic = "force-dynamic";
+const MAX_INLINE_PREVIEWS = 72;
 
 type PageProps = {
   params: Promise<{ slug: string }>;
@@ -39,12 +42,13 @@ function dimensionLabel(dimensions: Record<string, string | number> | undefined)
 
 export default async function PilotDatasetPage({ params }: PageProps) {
   const { slug } = await params;
-  const [index, readiness, previews, derivatives, sliceManifest] = await Promise.all([
+  const [index, readiness, previews, derivatives, sliceManifest, advisory] = await Promise.all([
     getPilotIndex(),
     getConversionReadiness(slug),
     getPreviewRecords(slug),
     getDerivativeManifest(slug),
     getSliceCacheManifest(slug),
+    getAdvisoryManifest(slug),
   ]);
 
   if (!readiness) {
@@ -54,8 +58,11 @@ export default async function PilotDatasetPage({ params }: PageProps) {
   const record = index?.datasets.find((item) => item.slug === slug);
   const previewsByFilename = new Map(previews.map((preview) => [preview.filename, preview]));
   const volumePreviewRecords = previews.filter((preview) => preview.preview);
+  const displayedPreviewRecords = volumePreviewRecords.slice(0, MAX_INLINE_PREVIEWS);
+  const hiddenPreviewCount = Math.max(0, volumePreviewRecords.length - displayedPreviewRecords.length);
+  const displayedPreviewFilenames = new Set(displayedPreviewRecords.map((preview) => preview.filename));
   const previewAssetHrefs = new Map(
-    volumePreviewRecords.map((preview) => [preview.filename, pilotAssetHref(preview.preview)])
+    displayedPreviewRecords.map((preview) => [preview.filename, pilotAssetHref(preview.preview)])
   );
   const derivativeBySource = new Map(
     (derivatives?.derivatives ?? []).map((derivative) => [derivative.source_relative_path, derivative])
@@ -64,6 +71,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
     (sliceManifest?.caches ?? []).map((cache) => [cache.source_relative_path, cache])
   );
   const readyAssetBySource = new Map(readiness.ready_assets.map((asset) => [asset.relative_path, asset]));
+  const advisoryFindings = publicAdvisoryFindings(advisory);
   const sliceCaches = sliceManifest?.caches ?? [];
   const fullSliceCaches = sliceCaches.filter(
     (cache) =>
@@ -76,7 +84,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
     <main>
       <div style={{ marginBottom: 24 }}>
         <Link href="/pilot" className="muted" style={{ textDecoration: "underline" }}>
-          ← Back to pilot lineup
+          ← Back to dataset lineup
         </Link>
       </div>
 
@@ -109,6 +117,40 @@ export default async function PilotDatasetPage({ params }: PageProps) {
         </section>
 
         <section className="panel">
+          <h2 className="section-title">Data Reuse Notes</h2>
+          {advisoryFindings.length === 0 ? (
+            <p className="muted" style={{ margin: 0 }}>
+              No reviewed data reuse notes are posted for this pilot.
+            </p>
+          ) : (
+            <>
+              <div className="pill-row">
+                <span className="pill">{advisoryFindings.length} reuse notes</span>
+              </div>
+              <p className="muted" style={{ lineHeight: 1.6 }}>
+                Reviewed notes for metadata or file details that could affect interpretation or
+                reuse.
+              </p>
+              <div style={{ display: "grid", gap: 12 }}>
+                {advisoryFindings.slice(0, 4).map((finding) => (
+                  <section key={finding.finding_id} className="panel" style={{ background: "var(--background)" }}>
+                    <div className="kicker">{finding.severity} · {finding.category}</div>
+                    <strong>{finding.asset_relative_path || "Dataset-level advisory"}</strong>
+                    <p className="muted" style={{ margin: "8px 0", lineHeight: 1.5 }}>
+                      {finding.summary}
+                    </p>
+                    <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
+                      {finding.impact}
+                    </p>
+                  </section>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+      </section>
+
+      <section className="panel" style={{ marginTop: 32 }}>
           <h2 className="section-title">Blocked Assets</h2>
           {readiness.blocked_assets.length === 0 ? (
             <p className="muted" style={{ margin: 0 }}>No blocked volumes in this pilot.</p>
@@ -125,7 +167,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
                     <p className="muted" style={{ margin: 0 }}>
                       {asset.recommended_actions.join(" ")}
                     </p>
-                    {preview?.preview ? (
+                    {preview?.preview && displayedPreviewFilenames.has(asset.relative_path) ? (
                       <Link
                         href={`#${encodeURIComponent(asset.relative_path)}`}
                         className="muted"
@@ -139,7 +181,6 @@ export default async function PilotDatasetPage({ params }: PageProps) {
               })}
             </div>
           )}
-        </section>
       </section>
 
       <section className="panel" style={{ marginTop: 32 }}>
@@ -151,7 +192,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
               scientific derivatives; OME-Zarr remains the production target.
             </p>
           </div>
-          <div className="figure-number">Local Pilot</div>
+          <div className="figure-number">Data</div>
         </div>
         <div className="pilot-readiness-stats">
           <span className="pill">{sliceCaches.length} viewable volumes</span>
@@ -260,13 +301,19 @@ export default async function PilotDatasetPage({ params }: PageProps) {
               Dependency-light PNG previews generated from local TIFF/MRC volumes.
             </p>
           </div>
-          <div className="figure-number">Pilot</div>
+          <div className="figure-number">Data</div>
+        </div>
+        <div className="pill-row" style={{ marginBottom: 18 }}>
+          <span className="pill">
+            {displayedPreviewRecords.length} of {volumePreviewRecords.length} previews shown
+          </span>
+          {hiddenPreviewCount > 0 ? <span className="pill">{hiddenPreviewCount} in inventory</span> : null}
         </div>
 
         <div className="pilot-preview-grid">
-          {volumePreviewRecords.map((preview) => {
+          {displayedPreviewRecords.map((preview) => {
             const href = previewAssetHrefs.get(preview.filename);
-            const readyAsset = readiness.ready_assets.find((asset) => asset.relative_path === preview.filename);
+            const readyAsset = readyAssetBySource.get(preview.filename);
             const blockedAsset = readiness.blocked_assets.find((asset) => asset.relative_path === preview.filename);
             const derivative = derivativeBySource.get(preview.filename);
             const sliceCache = sliceCacheBySource.get(preview.filename);
@@ -280,6 +327,8 @@ export default async function PilotDatasetPage({ params }: PageProps) {
                   <img
                     src={href}
                     alt={`${preview.filename} middle slice`}
+                    loading="lazy"
+                    decoding="async"
                     style={{ width: "100%", background: "#050505", display: "block" }}
                   />
                 ) : null}

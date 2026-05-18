@@ -34,6 +34,7 @@ PIPELINE_VERSION = "public-data-pilot-v0.2"
 TRAKEM2_PARSE_BYTES = 32 * 1024 * 1024
 DEFAULT_ZARR_CHUNK_SHAPE = (32, 256, 256)
 SLICE_CACHE_FORMATS = {"MRC", "TIFF"}
+PUBLIC_DATA_ASSETS_MANIFEST = Path(__file__).resolve().parents[2] / "references" / "manifests" / "public_data_assets.csv"
 
 
 class DirectoryLinkParser(HTMLParser):
@@ -1084,6 +1085,10 @@ def write_preview_outputs(root_dir: Path, records: list[PreviewRecord]) -> tuple
 
 def physical_scale_from_text(text: str) -> tuple[float, float, float] | None:
     normalized = text.replace("×", "x").replace("nm3", "nm").replace("nm^3", "nm")
+    isotropic = re.search(r"(?P<value>\d+(?:\.\d+)?)\s*nm\s*isotropic", normalized, re.IGNORECASE)
+    if isotropic:
+        value = float(isotropic.group("value"))
+        return value, value, value
     match = re.search(
         r"(?P<x>\d+(?:\.\d+)?)\s*(?:nm)?\s*x\s*(?P<y>\d+(?:\.\d+)?)\s*(?:nm)?\s*x\s*(?P<z>\d+(?:\.\d+)?)\s*nm",
         normalized,
@@ -1094,22 +1099,56 @@ def physical_scale_from_text(text: str) -> tuple[float, float, float] | None:
     return tuple(float(match.group(name)) for name in ("x", "y", "z"))  # type: ignore[return-value]
 
 
+def load_curated_public_asset_metadata(source: str, entry_id: str) -> dict[str, str] | None:
+    if not PUBLIC_DATA_ASSETS_MANIFEST.exists():
+        return None
+    source_tokens = {
+        source.upper(),
+        source.replace("-", "").upper(),
+    }
+    entry_tokens = {
+        entry_id.upper(),
+        entry_id.replace("-", "").upper(),
+    }
+    with PUBLIC_DATA_ASSETS_MANIFEST.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            haystack = " ".join(str(value or "") for value in row.values()).upper()
+            if any(f"{source_token}-{entry_token}" in haystack for source_token in source_tokens for entry_token in entry_tokens):
+                return {str(key): str(value or "") for key, value in row.items()}
+            if any(f"{source_token}{entry_token}" in haystack for source_token in source_tokens for entry_token in entry_tokens):
+                return {str(key): str(value or "") for key, value in row.items()}
+    return None
+
+
+def curated_physical_scale(curated_metadata: dict[str, str] | None) -> tuple[float, float, float] | None:
+    if not curated_metadata:
+        return None
+    for field in ("resolution", "data_availability_notes", "public_dataset_link_raw"):
+        scale = physical_scale_from_text(str(curated_metadata.get(field) or ""))
+        if scale:
+            return scale
+    return None
+
+
 def build_normalized_manifest(
     api_data: dict[str, Any],
     entry_id: str,
     inventory_rows: list[dict[str, Any]],
     download_manifest: Path,
+    curated_metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     entry = api_data.get(f"EMPIAR-{entry_id}", {})
     citation = (entry.get("citation") or [{}])[0]
     citation_details = str(citation.get("details") or "")
     entry_scale = physical_scale_from_text(citation_details)
+    curated_scale = curated_physical_scale(curated_metadata)
     assets: list[dict[str, Any]] = []
     for row in inventory_rows:
         asset_details = str(row.get("api_details") or "")
         asset_scale = physical_scale_from_text(asset_details)
         tiff_scale = tiff_physical_scale(row)
-        scale = asset_scale or entry_scale or tiff_scale
+        scale = asset_scale or entry_scale or curated_scale or tiff_scale
         assets.append(
             {
                 "relative_path": row["relative_path"],
@@ -1130,6 +1169,8 @@ def build_normalized_manifest(
                         if asset_scale
                         else "citation_details"
                         if entry_scale
+                        else "curated_public_data_assets_resolution"
+                        if curated_scale
                         else "tiff_imagej_metadata"
                         if tiff_scale
                         else ""
@@ -1161,6 +1202,14 @@ def build_normalized_manifest(
             "pubmedid": citation.get("pubmedid", ""),
             "details": citation_details,
         },
+        "curated_metadata": {
+            "study_id": curated_metadata.get("study_id", ""),
+            "study_slug": curated_metadata.get("study_slug", ""),
+            "resolution": curated_metadata.get("resolution", ""),
+            "source_file": curated_metadata.get("source_file", ""),
+        }
+        if curated_metadata
+        else {},
         "download_manifest": str(download_manifest),
         "asset_count": len(assets),
         "assets": assets,
@@ -1526,6 +1575,361 @@ def write_conversion_readiness_outputs(root_dir: Path, manifest: dict[str, Any])
                     "blockers": "; ".join(asset["blockers"]),
                     "recommended_actions": " | ".join(asset["recommended_actions"]),
                     "preview_path": asset["preview_path"],
+                }
+            )
+    return manifest_path, queue_path
+
+
+def advisory_manifest_path(root_dir: Path) -> Path:
+    return root_dir / "metadata" / "advisory-findings.json"
+
+
+def advisory_review_queue_path(root_dir: Path) -> Path:
+    return root_dir / "metadata" / "advisory-review-queue.tsv"
+
+
+def relative_asset_path(root_dir: Path, local_path: str) -> str:
+    try:
+        return Path(local_path).relative_to(root_dir / "data").as_posix()
+    except ValueError:
+        return Path(local_path).name
+
+
+def finding_slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return normalized[:80] or "dataset"
+
+
+def advisory_summary(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    by_severity: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    by_review_status: dict[str, int] = {}
+    public_count = 0
+    for finding in findings:
+        by_severity[finding["severity"]] = by_severity.get(finding["severity"], 0) + 1
+        by_category[finding["category"]] = by_category.get(finding["category"], 0) + 1
+        by_review_status[finding["review_status"]] = by_review_status.get(finding["review_status"], 0) + 1
+        if finding["public_notice_candidate"]:
+            public_count += 1
+    return {
+        "total_findings": len(findings),
+        "public_notice_candidates": public_count,
+        "by_severity": dict(sorted(by_severity.items())),
+        "by_category": dict(sorted(by_category.items())),
+        "by_review_status": dict(sorted(by_review_status.items())),
+    }
+
+
+def advisory_finding(
+    *,
+    dataset: dict[str, Any],
+    dataset_slug: str,
+    category: str,
+    severity: str,
+    code: str,
+    summary: str,
+    impact: str,
+    recommended_action: str,
+    asset_relative_path: str = "",
+    evidence: list[dict[str, Any]] | None = None,
+    public_notice_candidate: bool = True,
+) -> dict[str, Any]:
+    path_part = finding_slug(asset_relative_path or "dataset")
+    finding_id = "-".join(
+        [
+            finding_slug(str(dataset.get("source") or "source")),
+            finding_slug(str(dataset.get("entry_id") or dataset_slug)),
+            finding_slug(category),
+            path_part,
+            finding_slug(code),
+        ]
+    )
+    return {
+        "finding_id": finding_id,
+        "dataset_slug": dataset_slug,
+        "dataset": {
+            "source": dataset.get("source", ""),
+            "entry_id": dataset.get("entry_id", ""),
+            "title": dataset.get("title", ""),
+            "entry_doi": dataset.get("entry_doi", ""),
+        },
+        "asset_relative_path": asset_relative_path,
+        "severity": severity,
+        "category": category,
+        "code": code,
+        "summary": summary,
+        "impact": impact,
+        "recommended_action": recommended_action,
+        "evidence": evidence or [],
+        "public_notice_candidate": public_notice_candidate,
+        "review_status": "needs_human_review",
+        "detected_by": PIPELINE_VERSION,
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def asset_advisory_for_code(
+    *,
+    dataset: dict[str, Any],
+    dataset_slug: str,
+    asset_relative_path: str,
+    warning_code: str,
+    volume: dict[str, Any],
+) -> dict[str, Any] | None:
+    physical_scale = volume.get("physical_voxel_size_nm") or {}
+    header_scale = volume.get("header_voxel_size_nm") or {}
+    common_evidence = [
+        {"source": "asset-state-manifest", "field": "validated_volume.warnings", "value": warning_code},
+        {"source": "asset-state-manifest", "field": "physical_voxel_size_nm", "value": physical_scale},
+        {"source": "asset-state-manifest", "field": "header_voxel_size_nm", "value": header_scale},
+    ]
+    if warning_code == "mrc_header_physical_scale_likely_default":
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=asset_relative_path,
+            category="physical_scale",
+            severity="review",
+            code=warning_code,
+            summary="Raw MRC header physical scale appears default-like.",
+            impact="Users reading the raw MRC header may recover a voxel size that conflicts with curated repository or paper metadata.",
+            recommended_action="Use the curated physical scale recorded by Cell Anatomy and verify voxel size against repository or paper methods before quantitative measurement.",
+            evidence=common_evidence,
+        )
+    if warning_code.startswith("trakem2_z_spacing_suspicious:"):
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=asset_relative_path,
+            category="physical_scale",
+            severity="warning",
+            code="trakem2_z_spacing_suspicious",
+            summary="Parsed TrakEM2 z-spacing is outside the expected serial-section range.",
+            impact="Quantitative measurements that depend on section thickness may be misleading until the sidecar calibration is reviewed.",
+            recommended_action="Inspect the paired TrakEM2 XML and paper methods before treating z-spacing as validated.",
+            evidence=common_evidence,
+        )
+    if warning_code == "missing_physical_voxel_size":
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=asset_relative_path,
+            category="physical_scale",
+            severity="warning",
+            code=warning_code,
+            summary="No physical voxel size is available from the checked metadata sources.",
+            impact="The volume can be inspected visually, but should not be used for physical measurement without external calibration.",
+            recommended_action="Find an authoritative voxel-size source before quantitative reuse.",
+            evidence=[
+                {"source": "asset-state-manifest", "field": "validated_volume.physical_voxel_size_nm", "value": physical_scale},
+                {"source": "asset-state-manifest", "field": "validated_volume.header_voxel_size_nm", "value": header_scale},
+            ],
+        )
+    if warning_code == "missing_volume_dimensions":
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=asset_relative_path,
+            category="volume_geometry",
+            severity="warning",
+            code=warning_code,
+            summary="Volume dimensions could not be validated from available metadata.",
+            impact="Users may not be able to confirm axis size or stack depth without opening the source asset manually.",
+            recommended_action="Verify volume dimensions from a trusted reader before downstream analysis.",
+            evidence=[
+                {"source": "asset-state-manifest", "field": "validated_volume.dimensions", "value": volume.get("dimensions") or {}},
+                {"source": "asset-state-manifest", "field": "derived_advisory_code", "value": warning_code},
+            ],
+        )
+    if warning_code.startswith("tiff_parse_warning:"):
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=asset_relative_path,
+            category="file_readability",
+            severity="warning",
+            code="tiff_parse_warning",
+            summary="TIFF metadata parsing produced a warning.",
+            impact="Some readers may disagree about dimensions, planes, or calibration for this asset.",
+            recommended_action="Open the TIFF with an independent scientific image reader before quantitative reuse.",
+            evidence=[
+                {"source": "asset-state-manifest", "field": "validated_volume.warnings", "value": warning_code},
+            ],
+        )
+    return None
+
+
+def report_advisory_for_warning(
+    *,
+    dataset: dict[str, Any],
+    dataset_slug: str,
+    warning: str,
+) -> dict[str, Any] | None:
+    if "collection-level metadata" in warning:
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            category="repository_metadata",
+            severity="info",
+            code="collection_level_image_count",
+            summary="Repository image count appears to describe a collection rather than one local file.",
+            impact="Users should not interpret the reported image count as the slice count for each individual asset.",
+            recommended_action="Treat the repository image count as collection-level context and use validated local file dimensions for per-volume work.",
+            evidence=[{"source": "validation-report", "field": "warnings", "value": warning}],
+        )
+    match = re.match(r"^(?P<asset>.+): API reports (?P<expected>\d+) images but local file has (?P<actual>\d+) slices\.$", warning)
+    if match:
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=match.group("asset"),
+            category="repository_metadata",
+            severity="warning",
+            code="image_count_mismatch",
+            summary="Repository image count does not match the parsed local slice count.",
+            impact="Users may misread the expected stack depth if they rely on repository metadata alone.",
+            recommended_action="Use parsed local dimensions for stack navigation and verify count semantics in the repository record.",
+            evidence=[{"source": "validation-report", "field": "warnings", "value": warning}],
+        )
+    match = re.match(r"^(?P<asset>.+): Figshare expected (?P<expected>\d+) bytes but local file has (?P<actual>\d+) bytes\.$", warning)
+    if match:
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=match.group("asset"),
+            category="file_integrity",
+            severity="critical",
+            code="figshare_size_mismatch",
+            summary="Local file size does not match Figshare metadata.",
+            impact="The mirrored file may be incomplete or stale and should not be trusted for analysis.",
+            recommended_action="Re-download the asset and compare against Figshare's current metadata before reuse.",
+            evidence=[{"source": "validation-report", "field": "warnings", "value": warning}],
+        )
+    match = re.match(r"^(?P<asset>.+): Figshare MD5 mismatch\.$", warning)
+    if match:
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=match.group("asset"),
+            category="file_integrity",
+            severity="critical",
+            code="figshare_md5_mismatch",
+            summary="Local checksum does not match Figshare metadata.",
+            impact="The mirrored file may be corrupted or may not match the repository asset.",
+            recommended_action="Re-download the asset and verify checksum before reuse.",
+            evidence=[{"source": "validation-report", "field": "warnings", "value": warning}],
+        )
+    match = re.match(r"^(?P<asset>.+): MRC MAP marker missing or unexpected\.$", warning)
+    if match:
+        return advisory_finding(
+            dataset=dataset,
+            dataset_slug=dataset_slug,
+            asset_relative_path=match.group("asset"),
+            category="file_format",
+            severity="warning",
+            code="mrc_map_marker_unexpected",
+            summary="MRC header marker is missing or unexpected.",
+            impact="Some MRC readers may reject this file or interpret it inconsistently.",
+            recommended_action="Open the asset with an independent MRC reader before quantitative reuse.",
+            evidence=[{"source": "validation-report", "field": "warnings", "value": warning}],
+        )
+    return None
+
+
+def build_advisory_manifest(
+    root_dir: Path,
+    asset_state_manifest: dict[str, Any],
+    validation_report: dict[str, Any],
+) -> dict[str, Any]:
+    dataset = asset_state_manifest.get("dataset") or {}
+    dataset_slug = root_dir.name
+    findings: list[dict[str, Any]] = []
+    covered_asset_codes: set[tuple[str, str]] = set()
+
+    for asset in asset_state_manifest.get("assets", []):
+        mirrored = asset.get("mirrored_asset") or {}
+        volume = asset.get("validated_volume") or {}
+        asset_relative_path = relative_asset_path(root_dir, str(mirrored.get("local_path") or ""))
+        codes = set(str(item) for item in volume.get("warnings", []) if item)
+        codes.update(str(item) for item in volume.get("blockers", []) if item)
+        codes.update(str(item) for item in volume.get("review_notes", []) if item)
+        if volume.get("state") != "not_applicable":
+            dimensions = volume.get("dimensions") or {}
+            physical_scale = volume.get("physical_voxel_size_nm") or {}
+            if not all(dimensions.get(axis) not in {"", None} for axis in ("x", "y", "z")):
+                codes.add("missing_volume_dimensions")
+            if not all(physical_scale.get(axis) not in {"", None} for axis in ("x", "y", "z")):
+                codes.add("missing_physical_voxel_size")
+        for code in sorted(codes):
+            finding = asset_advisory_for_code(
+                dataset=dataset,
+                dataset_slug=dataset_slug,
+                asset_relative_path=asset_relative_path,
+                warning_code=code,
+                volume=volume,
+            )
+            if finding:
+                findings.append(finding)
+                covered_asset_codes.add((asset_relative_path, finding["code"]))
+
+    for warning in validation_report.get("warnings", []):
+        text = str(warning)
+        if "header physical scale is likely default" in text:
+            continue
+        if "trakem2_z_spacing_suspicious" in text:
+            continue
+        if "no physical voxel size found" in text:
+            continue
+        finding = report_advisory_for_warning(dataset=dataset, dataset_slug=dataset_slug, warning=text)
+        if finding and (finding["asset_relative_path"], finding["code"]) not in covered_asset_codes:
+            findings.append(finding)
+
+    findings = sorted(findings, key=lambda item: (item["severity"], item["category"], item["asset_relative_path"], item["finding_id"]))
+    return {
+        "pipeline_version": PIPELINE_VERSION,
+        "dataset": dataset,
+        "dataset_slug": dataset_slug,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scope": "External-user data integrity advisories. Internal pipeline limitations are intentionally excluded unless they affect interpretation or reuse.",
+        "summary": advisory_summary(findings),
+        "findings": findings,
+    }
+
+
+def write_advisory_outputs(root_dir: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
+    manifest_path = advisory_manifest_path(root_dir)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+    queue_path = advisory_review_queue_path(root_dir)
+    with queue_path.open("w", newline="") as output:
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "finding_id",
+                "severity",
+                "category",
+                "asset_relative_path",
+                "summary",
+                "impact",
+                "recommended_action",
+                "public_notice_candidate",
+                "review_status",
+            ],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        for finding in manifest["findings"]:
+            writer.writerow(
+                {
+                    "finding_id": finding["finding_id"],
+                    "severity": finding["severity"],
+                    "category": finding["category"],
+                    "asset_relative_path": finding["asset_relative_path"],
+                    "summary": finding["summary"],
+                    "impact": finding["impact"],
+                    "recommended_action": finding["recommended_action"],
+                    "public_notice_candidate": str(finding["public_notice_candidate"]).lower(),
+                    "review_status": finding["review_status"],
                 }
             )
     return manifest_path, queue_path
@@ -2177,6 +2581,8 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
         readiness_path = metadata_dir / "conversion-readiness-manifest.json"
         readiness = build_conversion_readiness_manifest(dataset_dir, state)
         write_conversion_readiness_outputs(dataset_dir, readiness)
+        advisory = build_advisory_manifest(dataset_dir, state, report)
+        advisory_path, advisory_queue_path = write_advisory_outputs(dataset_dir, advisory)
         asset_states: dict[str, int] = {}
         for asset in state["assets"]:
             value = str(asset["validated_volume"]["state"])
@@ -2188,10 +2594,13 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
                 "report": report,
                 "asset_states": asset_states,
                 "readiness": readiness["summary"],
+                "advisory": advisory["summary"],
                 "preview_href": root_href(root, dataset_dir / "derived" / "preview-index.html"),
                 "readiness_href": root_href(root, readiness_path),
                 "review_href": root_href(root, metadata_dir / "curation-review-queue.tsv"),
                 "validation_href": root_href(root, report_path),
+                "advisory_href": root_href(root, advisory_path),
+                "advisory_review_href": root_href(root, advisory_queue_path),
             }
         )
 
@@ -2203,6 +2612,7 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
         dataset = record["dataset"]
         report = record["report"]
         readiness = record["readiness"]
+        advisory = record["advisory"]
         states = ", ".join(f"{key}: {value}" for key, value in sorted(record["asset_states"].items()))
         rows.append(
             f"""
@@ -2213,7 +2623,8 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
         <td>{html.escape(states)}</td>
         <td>{html.escape(str(readiness.get('ready_assets', '')))} ready<br />{html.escape(str(readiness.get('blocked_assets', '')))} blocked</td>
         <td>{html.escape(str(len(report.get('warnings', []))))}</td>
-        <td><a href="{record['preview_href']}">previews</a> · <a href="{record['readiness_href']}">readiness</a> · <a href="{record['review_href']}">review queue</a> · <a href="{record['validation_href']}">validation</a></td>
+        <td>{html.escape(str(advisory.get('total_findings', '')))} findings<br />{html.escape(str(advisory.get('public_notice_candidates', '')))} notice candidates</td>
+        <td><a href="{record['preview_href']}">previews</a> · <a href="{record['readiness_href']}">readiness</a> · <a href="{record['review_href']}">review queue</a> · <a href="{record['validation_href']}">validation</a> · <a href="{record['advisory_href']}">advisories</a> · <a href="{record['advisory_review_href']}">advisory review</a></td>
       </tr>"""
         )
 
@@ -2241,6 +2652,7 @@ def write_pilot_index(root: Path) -> tuple[Path, Path]:
       <th>Asset States</th>
       <th>Conversion Gate</th>
       <th>Warnings</th>
+      <th>Advisories</th>
       <th>Open</th>
     </tr>
   </thead>
@@ -2257,6 +2669,7 @@ def validate_manifest(
     entry_id: str,
     inventory_rows: list[dict[str, Any]],
     preview_records: list[PreviewRecord],
+    curated_metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     entry = api_data.get(f"EMPIAR-{entry_id}", {})
     warnings: list[str] = []
@@ -2276,7 +2689,7 @@ def validate_manifest(
                 )
         if row.get("tiff_error"):
             warnings.append(f"{row['relative_path']}: TIFF parse warning: {row['tiff_error']}")
-        if is_volume_format(row.get("format")) and not physical_scale_from_row(row, entry):
+        if is_volume_format(row.get("format")) and not physical_scale_from_row(row, entry, curated_metadata):
             warnings.append(f"{row['relative_path']}: no physical voxel size found in curated text, API metadata, TIFF metadata, or MRC header.")
     warnings.extend(validate_imageset_counts(inventory_rows))
     for record in preview_records:
@@ -2338,11 +2751,13 @@ def validate_figshare_manifest(
     }
 
 
-def physical_scale_from_row(row: dict[str, Any], entry: dict[str, Any]) -> bool:
+def physical_scale_from_row(row: dict[str, Any], entry: dict[str, Any], curated_metadata: dict[str, str] | None = None) -> bool:
     citation = (entry.get("citation") or [{}])[0]
     if physical_scale_from_text(str(row.get("api_details") or "")):
         return True
     if physical_scale_from_text(str(citation.get("details") or "")):
+        return True
+    if curated_physical_scale(curated_metadata):
         return True
     if row.get("tiff_pixel_x_nm") and row.get("tiff_pixel_y_nm"):
         return True
@@ -2405,6 +2820,7 @@ def run_empiar(args: argparse.Namespace) -> int:
         print("--offline cannot be combined with --download.", file=sys.stderr)
         return 2
     api_data, remote_files = fetch_empiar_metadata(entry_id, metadata_dir, args.refresh_metadata, args.offline)
+    curated_metadata = load_curated_public_asset_metadata("EMPIAR", entry_id)
     download_manifest = metadata_dir / "download-manifest.tsv" if args.offline else write_download_manifest(remote_files, metadata_dir)
     print(f"Remote files {'loaded from cache' if args.offline else 'discovered'}: {len(remote_files)}")
     print(f"Download manifest: {download_manifest}")
@@ -2428,14 +2844,16 @@ def run_empiar(args: argparse.Namespace) -> int:
         preview_records = generate_previews(root_dir, inventory_rows)
         preview_index, preview_html = write_preview_outputs(root_dir, preview_records)
 
-    normalized_manifest = build_normalized_manifest(api_data, entry_id, inventory_rows, download_manifest)
+    normalized_manifest = build_normalized_manifest(api_data, entry_id, inventory_rows, download_manifest, curated_metadata)
     normalized_path = write_normalized_manifest(root_dir, normalized_manifest)
     asset_state_manifest = build_asset_state_manifest(root_dir, normalized_manifest, inventory_rows, remote_files, preview_records)
     asset_state_path = write_asset_state_manifest(root_dir, asset_state_manifest)
     readiness_manifest = build_conversion_readiness_manifest(root_dir, asset_state_manifest)
     readiness_path, review_queue_path = write_conversion_readiness_outputs(root_dir, readiness_manifest)
-    report = validate_manifest(api_data, entry_id, inventory_rows, preview_records)
+    report = validate_manifest(api_data, entry_id, inventory_rows, preview_records, curated_metadata)
     report_path = write_validation_report(root_dir, report)
+    advisory_manifest = build_advisory_manifest(root_dir, asset_state_manifest, report)
+    advisory_path, advisory_queue_path = write_advisory_outputs(root_dir, advisory_manifest)
     _, pilot_index_html = write_pilot_index(Path(args.root).expanduser())
 
     print(f"Inventory: {inventory_path}")
@@ -2444,12 +2862,15 @@ def run_empiar(args: argparse.Namespace) -> int:
     print(f"Conversion readiness: {readiness_path}")
     print(f"Curation review queue: {review_queue_path}")
     print(f"Validation report: {report_path}")
+    print(f"Advisory findings: {advisory_path}")
+    print(f"Advisory review queue: {advisory_queue_path}")
     print(f"Pilot index: {pilot_index_html}")
     if preview_index and preview_html:
         print(f"Preview inventory: {preview_index}")
         print(f"Preview HTML: {preview_html}")
     print(f"Local files: {report['file_count']} ({report['total_gib']} GiB)")
     print(f"Warnings: {len(report['warnings'])}")
+    print(f"Advisory findings: {advisory_manifest['summary']['total_findings']}")
     for warning in report["warnings"][:12]:
         print(f"  - {warning}")
     if len(report["warnings"]) > 12:
@@ -2503,6 +2924,8 @@ def run_figshare(args: argparse.Namespace) -> int:
     readiness_path, review_queue_path = write_conversion_readiness_outputs(root_dir, readiness_manifest)
     report = validate_figshare_manifest(article_data, article_id, inventory_rows, preview_records)
     report_path = write_validation_report(root_dir, report)
+    advisory_manifest = build_advisory_manifest(root_dir, asset_state_manifest, report)
+    advisory_path, advisory_queue_path = write_advisory_outputs(root_dir, advisory_manifest)
     _, pilot_index_html = write_pilot_index(Path(args.root).expanduser())
 
     print(f"Inventory: {inventory_path}")
@@ -2511,16 +2934,56 @@ def run_figshare(args: argparse.Namespace) -> int:
     print(f"Conversion readiness: {readiness_path}")
     print(f"Curation review queue: {review_queue_path}")
     print(f"Validation report: {report_path}")
+    print(f"Advisory findings: {advisory_path}")
+    print(f"Advisory review queue: {advisory_queue_path}")
     print(f"Pilot index: {pilot_index_html}")
     if preview_index and preview_html:
         print(f"Preview inventory: {preview_index}")
         print(f"Preview HTML: {preview_html}")
     print(f"Local files: {report['file_count']} ({report['total_gib']} GiB)")
     print(f"Warnings: {len(report['warnings'])}")
+    print(f"Advisory findings: {advisory_manifest['summary']['total_findings']}")
     for warning in report["warnings"][:12]:
         print(f"  - {warning}")
     if len(report["warnings"]) > 12:
         print(f"  ... {len(report['warnings']) - 12} more warnings")
+    return 0
+
+
+def run_advisory(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser()
+    slugs: list[str]
+    if args.all:
+        slugs = sorted(item.name for item in root.iterdir() if item.is_dir())
+    elif args.slug:
+        slugs = [args.slug]
+    else:
+        print("Provide a slug or use --all.", file=sys.stderr)
+        return 2
+
+    for slug in slugs:
+        dataset_dir = root / slug
+        metadata_dir = dataset_dir / "metadata"
+        state_path = metadata_dir / "asset-state-manifest.json"
+        report_path = metadata_dir / "validation-report.json"
+        if not state_path.exists() or not report_path.exists():
+            print(f"{slug}: missing asset-state-manifest.json or validation-report.json", file=sys.stderr)
+            continue
+        state = read_json_file(state_path)
+        report = read_json_file(report_path)
+        manifest = build_advisory_manifest(dataset_dir, state, report)
+        manifest_path, queue_path = write_advisory_outputs(dataset_dir, manifest)
+        summary = manifest["summary"]
+        print(
+            f"{slug}: {summary['total_findings']} findings, "
+            f"{summary['public_notice_candidates']} public notice candidates"
+        )
+        print(f"  advisory manifest: {manifest_path}")
+        print(f"  advisory review queue: {queue_path}")
+
+    json_path, html_path = write_pilot_index(root)
+    print(f"Pilot index JSON: {json_path}")
+    print(f"Pilot index HTML: {html_path}")
     return 0
 
 
@@ -2559,6 +3022,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index = subparsers.add_parser("index", help="Build a local index across existing pilot dataset outputs.")
     index.add_argument("--root", default=str(DEFAULT_ROOT), help=f"Data root. Default: {DEFAULT_ROOT}")
+    advisory = subparsers.add_parser("advisory", help="Build neutral data-integrity advisory findings for existing pilot outputs.")
+    advisory.add_argument("slug", nargs="?", help="Local dataset directory name.")
+    advisory.add_argument("--root", default=str(DEFAULT_ROOT), help=f"Data root. Default: {DEFAULT_ROOT}")
+    advisory.add_argument("--all", action="store_true", help="Build advisories for every dataset under the root.")
     convert = subparsers.add_parser("convert", help="Convert one validated pilot TIFF asset into a local OME-Zarr derivative.")
     convert.add_argument("slug", help="Local dataset directory name.")
     convert.add_argument("--root", default=str(DEFAULT_ROOT), help=f"Data root. Default: {DEFAULT_ROOT}")
@@ -2595,6 +3062,8 @@ def main() -> int:
         print(f"Pilot index JSON: {json_path}")
         print(f"Pilot index HTML: {html_path}")
         return 0
+    if args.source == "advisory":
+        return run_advisory(args)
     if args.source == "convert":
         return run_convert(args)
     if args.source == "slices":

@@ -14,6 +14,7 @@ export function Navbar({ showPilot = false }: NavbarProps) {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   const [pilotVisible, setPilotVisible] = useState(showPilot);
+  const [reviewVisible, setReviewVisible] = useState(false);
   
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -27,6 +28,7 @@ export function Navbar({ showPilot = false }: NavbarProps) {
   const selectedModality = searchParams.get("family") ?? "";
 
   const compareHref = selectedIds.length > 0 ? `/compare?ids=${selectedIds.join(",")}` : "/compare";
+  const isHomeRoute = pathname === "/";
   const isCorpusRoute = pathname === "/corpus";
 
   const handleSubmit = (e?: React.FormEvent<HTMLFormElement>) => {
@@ -82,6 +84,17 @@ export function Navbar({ showPilot = false }: NavbarProps) {
         // Keep the server-rendered value if the runtime check fails.
       });
 
+    fetch("/pilot-review-status", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((status: { enabled?: boolean } | null) => {
+        if (!cancelled && typeof status?.enabled === "boolean") {
+          setReviewVisible(status.enabled);
+        }
+      })
+      .catch(() => {
+        setReviewVisible(false);
+      });
+
     return () => {
       cancelled = true;
     };
@@ -93,7 +106,7 @@ export function Navbar({ showPilot = false }: NavbarProps) {
         <div className="nav-title">
           <Link href="/" style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <Logo />
-            <span>Cell Anatomy</span>
+            {isHomeRoute ? <span>Cell Anatomy</span> : null}
           </Link>
         </div>
 
@@ -172,7 +185,12 @@ export function Navbar({ showPilot = false }: NavbarProps) {
               </Link>
               {pilotVisible ? (
                 <Link href="/pilot" className="nav-link">
-                  Pilot
+                  Data
+                </Link>
+              ) : null}
+              {reviewVisible ? (
+                <Link href="/pilot/review" className="nav-link">
+                  Review
                 </Link>
               ) : null}
               <Link href="/about" className="nav-link">

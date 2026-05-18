@@ -16,7 +16,7 @@ export const metadata: Metadata = {
   title: "Cell Anatomy",
   description: "Cross-repository lookup and comparison for whole-cell imaging datasets.",
   icons: {
-    icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><ellipse cx="12" cy="16" rx="8" ry="13" stroke="%23888" stroke-width="2" fill="none"/><ellipse cx="20" cy="16" rx="8" ry="13" stroke="%23888" stroke-width="2" fill="none"/></svg>',
+    icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="250 198 700 504"><defs><mask id="m"><rect x="250" y="198" width="700" height="504" fill="white"/><rect x="570" y="198" width="60" height="504" fill="black"/><rect x="400" y="285" width="400" height="330" rx="20" ry="20" fill="black"/></mask></defs><rect x="250" y="200" width="700" height="500" rx="28" ry="28" fill="%23171511" mask="url(%23m)"/></svg>',
   },
 };
 

@@ -1,6 +1,6 @@
-# Scion web
+# Cell Anatomy web
 
-Next.js front end for the Scion MVP.
+Next.js front end for the Cell Anatomy MVP.
 
 ## Responsibilities
 

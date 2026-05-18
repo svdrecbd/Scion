@@ -2,8 +2,10 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   bytesToGiB,
+  getAdvisoryManifest,
   getSliceCacheManifest,
   pilotAssetHref,
+  publicAdvisoryFindings,
   safePilotPath,
 } from "../../../../lib/public-pilot";
 import { PilotSliceViewer } from "../../../../components/pilot-slice-viewer";
@@ -18,7 +20,10 @@ type PageProps = {
 export default async function PilotViewerPage({ params, searchParams }: PageProps) {
   const { slug } = await params;
   const { asset } = await searchParams;
-  const manifest = await getSliceCacheManifest(slug);
+  const [manifest, advisory] = await Promise.all([
+    getSliceCacheManifest(slug),
+    getAdvisoryManifest(slug),
+  ]);
 
   if (!manifest || manifest.caches.length === 0) {
     notFound();
@@ -39,6 +44,9 @@ export default async function PilotViewerPage({ params, searchParams }: PageProp
     width: frame.width,
     height: frame.height,
   }));
+  const advisoryFindings = publicAdvisoryFindings(advisory).filter(
+    (finding) => finding.asset_relative_path === cache.source_relative_path
+  );
 
   return (
     <main>
@@ -60,6 +68,25 @@ export default async function PilotViewerPage({ params, searchParams }: PageProp
         frames={frames}
       />
 
+      {advisoryFindings.length > 0 ? (
+        <section className="panel" style={{ marginTop: 24 }}>
+          <h2 className="section-title">Data Reuse Note</h2>
+          <div style={{ display: "grid", gap: 12 }}>
+            {advisoryFindings.map((finding) => (
+              <div key={finding.finding_id}>
+                <div className="kicker">{finding.severity} · {finding.category}</div>
+                <p className="muted" style={{ margin: "4px 0", lineHeight: 1.6 }}>
+                  {finding.summary}
+                </p>
+                <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
+                  {finding.impact}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <section className="panel-grid two" style={{ marginTop: 24 }}>
         <section className="panel">
           <h2 className="section-title">Viewer Cache</h2>
@@ -71,8 +98,8 @@ export default async function PilotViewerPage({ params, searchParams }: PageProp
         <section className="panel">
           <h2 className="section-title">Boundary</h2>
           <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
-            This is a local inspection viewer built from generated PNG planes. It is not a canonical
-            analysis export and does not replace OME-Zarr for power-user navigation.
+            This inspection viewer is built from generated PNG planes. It is not a canonical
+            analysis export and does not replace OME-Zarr for advanced navigation.
           </p>
         </section>
       </section>

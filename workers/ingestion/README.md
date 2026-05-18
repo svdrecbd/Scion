@@ -2,7 +2,7 @@
 
 This directory is where source-specific ingestion code should live.
 
-For the MVP, the goal is not full automation. The goal is a repeatable path from raw source metadata to a validated Scion dataset record.
+For the MVP, the goal is not full automation. The goal is a repeatable path from raw source metadata to a validated Cell Anatomy dataset record.
 
 ## Responsibilities
 
@@ -32,6 +32,8 @@ It writes local outputs outside git by default under `~/Downloads/scion-public-d
 - `metadata/conversion-readiness-manifest.json`
 - `metadata/curation-review-queue.tsv`
 - `metadata/validation-report.json`
+- `metadata/advisory-findings.json`
+- `metadata/advisory-review-queue.tsv`
 - `metadata/preview-inventory.tsv`
 - `metadata/slice-manifest.json`
 - `derived/preview-index.html`
@@ -97,6 +99,8 @@ Known validation behavior:
 - MRC physical scale from headers is flagged when it looks like a default header value rather than source-authoritative calibration.
 - Figshare TrakEM2 z-spacing is marked for review when the parsed spacing is outside a conservative serial-section range.
 - Non-volume sidecars such as TrakEM2 XML gzips are inventoried and checksummed but marked `not_applicable` for `validated_volume`.
+- User-impacting repository or asset inconsistencies are promoted into neutral advisory findings. These are evidence-backed review candidates, not blame language or public accusations.
+- Generated advisory findings default to `review_status=needs_human_review`. The web UI only displays findings marked `review_status=approved_public` and `public_notice_candidate=true` as Data Reuse Notes.
 
 Run non-network unit tests:
 
@@ -114,6 +118,29 @@ That writes:
 
 - `~/Downloads/scion-public-data/pilot-index.html`
 - `~/Downloads/scion-public-data/pilot-index.json`
+
+Refresh neutral data-integrity advisories across existing outputs:
+
+```bash
+python3 workers/ingestion/public_data_pilot.py advisory --all \
+  --root ~/Downloads/scion-public-data
+```
+
+That writes per dataset:
+
+- `metadata/advisory-findings.json`
+- `metadata/advisory-review-queue.tsv`
+
+Use the local-only review suite to inspect and approve flags:
+
+```bash
+cd apps/web
+SCION_ENABLE_PUBLIC_DATA_PILOT=true \
+SCION_ENABLE_LOCAL_REVIEW_SUITE=true \
+npm run start -- --hostname 127.0.0.1 --port 3104
+```
+
+Then open `/pilot/review`. The suite can mark findings as `approved_public`, `internal_only`, `dismissed`, or back to `needs_human_review`. Only `approved_public` findings with `public_notice_candidate=true` appear on public Data pages as Data Reuse Notes.
 
 Convert one validated TIFF volume into a local OME-Zarr derivative:
 
@@ -134,7 +161,7 @@ make pilot-convert \
 
 The converter currently writes a dependency-light Zarr v2 / OME-NGFF single-scale store under `derived/ome-zarr/`, updates `metadata/derivative-manifest.json`, and marks the source asset's `streamable_derivative` state in `metadata/asset-state-manifest.json`. This is a conversion-readiness spike, not the final serving architecture.
 
-Generate a Scion-native browser slice cache for one validated TIFF volume:
+Generate a Cell Anatomy browser slice cache for one validated TIFF volume:
 
 ```bash
 python3 workers/ingestion/public_data_pilot.py slices \
@@ -162,9 +189,9 @@ make pilot-slices \
   PILOT_ALL_SLICES=1
 ```
 
-The slice cache writes sampled or complete PNG planes under `derived/slice-cache/` and records them in `metadata/slice-manifest.json`. This is the low-bloat path for the native Scion Slice Viewer. It is not a canonical analysis derivative; OME-Zarr remains the streamable power-user target. The viewer supports keyboard navigation with left/right arrows and Home/End, preloads adjacent frames, draws a scale bar from physical voxel metadata, and reports whether the cache is sampled or complete. Contrast metadata is explicit: 8-bit sources are written directly, while 16-bit sources are currently normalized per slice for inspection.
+The slice cache writes sampled or complete PNG planes under `derived/slice-cache/` and records them in `metadata/slice-manifest.json`. This is the low-bloat path for the native Cell Anatomy Slice Viewer. It is not a canonical analysis derivative; OME-Zarr remains the streamable power-user target. The viewer supports keyboard navigation with left/right arrows and Home/End, preloads adjacent frames, draws a scale bar from physical voxel metadata, and reports whether the cache is sampled or complete. Contrast metadata is explicit: 8-bit sources are written directly, while 16-bit sources are currently normalized per slice for inspection.
 
-To browse pilot figures inside the local Scion web app, run the web server with the pilot browser enabled:
+To browse pilot figures inside the local Cell Anatomy web app, run the web server with the pilot browser enabled:
 
 ```bash
 cd apps/web

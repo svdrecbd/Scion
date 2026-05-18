@@ -67,6 +67,30 @@ class PublicDataPilotTests(unittest.TestCase):
         scale = manifest["assets"][0]["physical_voxel_size_nm"]
         self.assertEqual(scale, {"x": 20.0, "y": 20.0, "z": 10.0, "source": "tiff_imagej_metadata"})
 
+    def test_isotropic_nm_scale_text_is_parsed(self) -> None:
+        self.assertEqual(pilot.physical_scale_from_text("8nm isotropic"), (8.0, 8.0, 8.0))
+
+    def test_curated_public_asset_resolution_is_used_for_empiar_scale(self) -> None:
+        row = {
+            "relative_path": "cell.tif",
+            "format": "TIFF",
+            "size_bytes": 10,
+            "sha256": "abc",
+            "tiff_width": 4,
+            "tiff_height": 3,
+            "tiff_slices": 2,
+            "api_details": "",
+        }
+        api_data = {"EMPIAR-1": {"title": "test", "citation": [{"details": ""}]}}
+        curated_metadata = {"study_id": "Example 2026", "study_slug": "example-2026", "resolution": "8nm isotropic"}
+
+        manifest = pilot.build_normalized_manifest(api_data, "1", [row], Path("download-manifest.tsv"), curated_metadata)
+        report = pilot.validate_manifest(api_data, "1", [row], [], curated_metadata)
+
+        scale = manifest["assets"][0]["physical_voxel_size_nm"]
+        self.assertEqual(scale, {"x": 8.0, "y": 8.0, "z": 8.0, "source": "curated_public_data_assets_resolution"})
+        self.assertFalse(report["warnings"], report["warnings"])
+
     def test_curated_asset_scale_wins_over_header_scale(self) -> None:
         row = {
             "relative_path": "cell.mrc",
@@ -395,6 +419,81 @@ class PublicDataPilotTests(unittest.TestCase):
             self.assertTrue(html_path.exists())
             self.assertTrue((metadata / "conversion-readiness-manifest.json").exists())
             self.assertTrue((metadata / "curation-review-queue.tsv").exists())
+            self.assertTrue((metadata / "advisory-findings.json").exists())
+            self.assertTrue((metadata / "advisory-review-queue.tsv").exists())
+
+    def test_advisory_manifest_promotes_user_impacting_findings(self) -> None:
+        root = Path("/tmp/scion-pilot/laundon")
+        asset_state = {
+            "dataset": {"source": "Figshare", "entry_id": "7346750", "title": "test"},
+            "assets": [
+                {
+                    "mirrored_asset": {
+                        "local_path": str(root / "data" / "Fig 3M_RC4.tif"),
+                        "format": "TIFF",
+                        "size_bytes": 10,
+                    },
+                    "validated_volume": {
+                        "state": "needs_review",
+                        "dimensions": {"x": 10, "y": 10, "z": 4},
+                        "physical_voxel_size_nm": {"x": 7.31, "y": 7.31, "z": 15, "source": "trakem2_calibration"},
+                        "header_voxel_size_nm": {"x": "", "y": "", "z": "", "source": ""},
+                        "warnings": ["trakem2_z_spacing_suspicious:15nm"],
+                        "blockers": ["trakem2_z_spacing_suspicious:15nm"],
+                        "review_notes": [],
+                    },
+                }
+            ],
+        }
+        report = {
+            "warnings": [
+                "Fig 3M_RC4.tif: trakem2_z_spacing_suspicious:15nm",
+                "collection: API reports 500 images for an imageset spanning 8 local files with 4848 total slices; treat API count as collection-level metadata.",
+            ]
+        }
+
+        advisory = pilot.build_advisory_manifest(root, asset_state, report)
+
+        self.assertEqual(advisory["summary"]["total_findings"], 2)
+        self.assertEqual(advisory["summary"]["public_notice_candidates"], 2)
+        categories = {finding["category"] for finding in advisory["findings"]}
+        self.assertEqual(categories, {"physical_scale", "repository_metadata"})
+        self.assertTrue(all(finding["review_status"] == "needs_human_review" for finding in advisory["findings"]))
+
+    def test_advisory_manifest_derives_missing_scale_and_dimension_findings(self) -> None:
+        root = Path("/tmp/scion-pilot/example")
+        asset_state = {
+            "dataset": {"source": "EMPIAR", "entry_id": "1", "title": "test"},
+            "assets": [
+                {
+                    "mirrored_asset": {
+                        "local_path": str(root / "data" / "cell.mrc"),
+                        "format": "MRC",
+                        "size_bytes": 10,
+                    },
+                    "validated_volume": {
+                        "state": "needs_review",
+                        "dimensions": {"x": 10, "y": "", "z": 4},
+                        "physical_voxel_size_nm": {"x": "", "y": "", "z": "", "source": ""},
+                        "header_voxel_size_nm": {"x": "", "y": "", "z": "", "source": ""},
+                        "warnings": [],
+                        "blockers": [],
+                        "review_notes": [],
+                    },
+                }
+            ],
+        }
+        report = {
+            "warnings": [
+                "cell.mrc: no physical voxel size found in curated text, API metadata, TIFF metadata, or MRC header."
+            ]
+        }
+
+        advisory = pilot.build_advisory_manifest(root, asset_state, report)
+
+        self.assertEqual(advisory["summary"]["total_findings"], 2)
+        codes = {finding["code"] for finding in advisory["findings"]}
+        self.assertEqual(codes, {"missing_physical_voxel_size", "missing_volume_dimensions"})
 
     def test_parse_chunk_shape_requires_three_positive_axes(self) -> None:
         self.assertEqual(pilot.parse_chunk_shape("4,64,128"), (4, 64, 128))
