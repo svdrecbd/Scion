@@ -32,6 +32,32 @@ class PublicDataPilotTests(unittest.TestCase):
         payload = b"".join(struct.pack("<4h", *plane) for plane in planes)
         path.write_bytes(bytes(header) + payload)
 
+    def write_test_tiff(self, path: Path, pixels: bytes = b"\x00\x40\x80\xff") -> None:
+        width = 2
+        height = 2
+        entries = [
+            (256, 4, 1, width),
+            (257, 4, 1, height),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 1),
+            (273, 4, 1, 0),
+            (277, 3, 1, 1),
+            (278, 4, 1, height),
+            (279, 4, 1, len(pixels)),
+        ]
+        data_offset = 8 + 2 + len(entries) * 12 + 4
+        encoded = bytearray(b"II" + struct.pack("<H", 42) + struct.pack("<I", 8))
+        encoded.extend(struct.pack("<H", len(entries)))
+        for tag, value_type, count, value in entries:
+            if tag == 273:
+                value = data_offset
+            raw_value = struct.pack("<H", value) + b"\x00\x00" if value_type == 3 else struct.pack("<I", value)
+            encoded.extend(struct.pack("<HHI", tag, value_type, count) + raw_value)
+        encoded.extend(struct.pack("<I", 0))
+        encoded.extend(pixels)
+        path.write_bytes(bytes(encoded))
+
     def test_offline_metadata_uses_cached_api_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             metadata_dir = Path(temp_dir)
@@ -545,6 +571,46 @@ class PublicDataPilotTests(unittest.TestCase):
         self.assertEqual(cache["source_dtype"], "int16")
         self.assertEqual(cache["source_shape_zyx"], [3, 2, 2])
         self.assertEqual(cache["sampling"]["cached_slices"], 2)
+        self.assertEqual(len(cache["frames"]), 2)
+
+    def test_tiff_series_cache_treats_single_plane_files_as_stack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data" / "FIBSEM"
+            data_dir.mkdir(parents=True)
+            ready_assets = []
+            for index in range(1, 5):
+                relative_path = f"FIBSEM/amst_crop_{index:04d}.tif"
+                source = root / "data" / relative_path
+                self.write_test_tiff(source, bytes([index, index + 1, index + 2, index + 3]))
+                ready_assets.append(
+                    {
+                        "relative_path": relative_path,
+                        "format": "TIFF",
+                        "size_bytes": source.stat().st_size,
+                        "dimensions": {"x": 2, "y": 2, "z": 1},
+                        "physical_voxel_size_nm": {"x": 8, "y": 8, "z": 8, "source": "test"},
+                    }
+                )
+            readiness = {"ready_assets": ready_assets}
+
+            groups = pilot.tiff_series_groups(readiness, min_planes=3)
+            cache = pilot.write_tiff_series_slice_cache(
+                root,
+                groups[0],
+                max_slices=2,
+                all_slices=False,
+                max_width=10,
+                max_height=10,
+            )
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["source_relative_path"], "FIBSEM/amst_crop_0001-0004.tiff-series")
+        self.assertEqual(cache["source_format"], "TIFF series")
+        self.assertEqual(cache["source_shape_zyx"], [4, 2, 2])
+        self.assertEqual(cache["sampling"]["cached_slices"], 2)
+        self.assertEqual(cache["sampling"]["selected_z_indices"], [0, 3])
+        self.assertEqual(cache["source_file_count"], 4)
         self.assertEqual(len(cache["frames"]), 2)
 
     def test_select_slice_assets_can_include_mrc_and_tiff(self) -> None:

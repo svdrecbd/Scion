@@ -191,6 +191,18 @@ make pilot-slices \
 
 The slice cache writes sampled or complete PNG planes under `derived/slice-cache/` and records them in `metadata/slice-manifest.json`. This is the low-bloat path for the native Cell Anatomy Slice Viewer. It is not a canonical analysis derivative; OME-Zarr remains the streamable power-user target. The viewer supports keyboard navigation with left/right arrows and Home/End, preloads adjacent frames, draws a scale bar from physical voxel metadata, and reports whether the cache is sampled or complete. Contrast metadata is explicit: 8-bit sources are written directly, while 16-bit sources are currently normalized per slice for inspection.
 
+For EMPIAR entries that publish a single volume as numbered one-plane TIFF files, generate one logical TIFF-series viewer cache:
+
+```bash
+python3 workers/ingestion/public_data_pilot.py slices \
+  mocaer-2023-empiar-11399 \
+  --root ~/Downloads/scion-public-data \
+  --tiff-series \
+  --max-slices 96
+```
+
+The TIFF-series mode groups numbered single-plane TIFF files with matching dimensions, sorts them by their numeric suffix, samples across the full run, and records one logical cache in `metadata/slice-manifest.json`.
+
 To browse pilot figures inside the local Cell Anatomy web app, run the web server with the pilot browser enabled:
 
 ```bash

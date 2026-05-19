@@ -2145,6 +2145,204 @@ def write_mrc_slice_cache(
     }
 
 
+def int_value(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def tiff_series_parts(asset: dict[str, Any]) -> dict[str, Any] | None:
+    if asset.get("format") != "TIFF":
+        return None
+    dimensions = asset.get("dimensions") or {}
+    if int_value(dimensions.get("z")) != 1:
+        return None
+    relative_path = str(asset.get("relative_path") or "")
+    if not re.search(r"\.tiff?$", relative_path, flags=re.IGNORECASE):
+        return None
+    path = Path(relative_path)
+    stem = re.sub(r"\.tiff?$", "", path.name, flags=re.IGNORECASE)
+    match = re.match(r"^(?P<prefix>.*?)(?P<index>\d+)(?P<suffix>[^0-9]*)$", stem)
+    if not match:
+        return None
+    width = int_value(dimensions.get("x"))
+    height = int_value(dimensions.get("y"))
+    if not width or not height:
+        return None
+    return {
+        "directory": path.parent.as_posix() if path.parent.as_posix() != "." else "",
+        "prefix": match.group("prefix"),
+        "suffix": match.group("suffix"),
+        "index": int(match.group("index")),
+        "index_text": match.group("index"),
+        "width": width,
+        "height": height,
+    }
+
+
+def tiff_series_groups(readiness: dict[str, Any], min_planes: int) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, int, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for asset in readiness.get("ready_assets", []):
+        parts = tiff_series_parts(asset)
+        if not parts:
+            continue
+        key = (
+            str(parts["directory"]),
+            str(parts["prefix"]),
+            str(parts["suffix"]),
+            int(parts["width"]),
+            int(parts["height"]),
+        )
+        grouped.setdefault(key, []).append((asset, parts))
+
+    series: list[dict[str, Any]] = []
+    for (directory, prefix, suffix, width, height), items in grouped.items():
+        ordered = sorted(items, key=lambda item: (int(item[1]["index"]), str(item[0]["relative_path"])))
+        if len(ordered) < min_planes:
+            continue
+        first_parts = ordered[0][1]
+        last_parts = ordered[-1][1]
+        source_name = f"{prefix}{first_parts['index_text']}-{last_parts['index_text']}{suffix}.tiff-series"
+        source_relative_path = f"{directory}/{source_name}" if directory else source_name
+        first_asset = ordered[0][0]
+        series.append(
+            {
+                "source_relative_path": source_relative_path,
+                "directory": directory,
+                "assets": [asset for asset, _ in ordered],
+                "width": width,
+                "height": height,
+                "physical_voxel_size_nm": first_asset.get("physical_voxel_size_nm", {}),
+                "size_bytes": sum(int(asset.get("size_bytes") or 0) for asset, _ in ordered),
+                "first_asset": ordered[0][0]["relative_path"],
+                "last_asset": ordered[-1][0]["relative_path"],
+            }
+        )
+    return sorted(series, key=lambda item: str(item["source_relative_path"]))
+
+
+def select_tiff_series_groups(
+    readiness: dict[str, Any],
+    requested_asset: str | None,
+    all_ready: bool,
+    min_planes: int,
+) -> list[dict[str, Any]]:
+    groups = tiff_series_groups(readiness, min_planes=min_planes)
+    if requested_asset and all_ready:
+        raise ValueError("cannot_combine_asset_and_all_ready")
+    if requested_asset:
+        for group in groups:
+            if group["source_relative_path"] == requested_asset:
+                return [group]
+            if requested_asset in {asset["relative_path"] for asset in group["assets"]}:
+                return [group]
+        raise ValueError(f"requested_tiff_series_not_ready:{requested_asset}")
+    if not groups:
+        raise ValueError("no_ready_tiff_series_assets")
+    if all_ready:
+        return groups
+    return [max(groups, key=lambda group: len(group["assets"]))]
+
+
+def write_tiff_series_slice_cache(
+    root_dir: Path,
+    series: dict[str, Any],
+    max_slices: int,
+    all_slices: bool,
+    max_width: int,
+    max_height: int,
+) -> dict[str, Any]:
+    if max_slices <= 0:
+        raise ValueError("max_slices_must_be_positive")
+    if max_width <= 0 or max_height <= 0:
+        raise ValueError("max_dimensions_must_be_positive")
+
+    assets = series["assets"]
+    selected_indices = sample_slice_indices(len(assets), max_slices, all_slices)
+    output_dir = root_dir / "derived" / "slice-cache" / safe_derivative_name(series["source_relative_path"])
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
+    frames: list[dict[str, Any]] = []
+    source_width = int(series["width"])
+    source_height = int(series["height"])
+    source_bits = 0
+    frame_width = 0
+    frame_height = 0
+    for sequence_index, z_index in enumerate(selected_indices):
+        asset = assets[z_index]
+        source_path = root_dir / "data" / asset["relative_path"]
+        endian, ifds = parse_classic_tiff_ifds(source_path)
+        if not ifds:
+            raise ValueError(f"no_tiff_ifds:{asset['relative_path']}")
+        image, width, height, bits = tiff_slice_u8(source_path, endian, ifds[0])
+        source_width = width
+        source_height = height
+        source_bits = bits
+        downsampled, preview_width, preview_height = downsample_u8(
+            image,
+            width,
+            height,
+            max_width=max_width,
+            max_height=max_height,
+        )
+        frame_width = preview_width
+        frame_height = preview_height
+        output = output_dir / f"slice-z{z_index:06d}.png"
+        write_png_gray(output, downsampled, preview_width, preview_height)
+        frames.append(
+            {
+                "sequence_index": sequence_index,
+                "z_index": z_index,
+                "relative_path": output.relative_to(root_dir).as_posix(),
+                "width": preview_width,
+                "height": preview_height,
+                "source_relative_path": asset["relative_path"],
+            }
+        )
+
+    if source_bits == 8:
+        contrast = {
+            "mode": "source_uint8",
+            "note": "8-bit source planes are written directly without intensity renormalization.",
+        }
+    else:
+        contrast = {
+            "mode": "per_slice_auto",
+            "note": "Each generated plane is normalized independently for visual inspection.",
+        }
+
+    return {
+        "source_relative_path": series["source_relative_path"],
+        "source_local_path": str(root_dir / "data" / str(series.get("directory") or "")),
+        "source_sha256": "",
+        "source_size_bytes": series["size_bytes"],
+        "source_file_count": len(assets),
+        "first_source_file": series["first_asset"],
+        "last_source_file": series["last_asset"],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_tool": "scion_public_data_pilot.write_tiff_series_slice_cache",
+        "format": "PNG Slice Cache",
+        "source_format": "TIFF series",
+        "source_dtype": f"uint{source_bits}" if source_bits else "",
+        "source_shape_zyx": [len(assets), source_height, source_width],
+        "frame_shape_yx": [frame_height, frame_width],
+        "physical_voxel_size_nm": series.get("physical_voxel_size_nm", {}),
+        "sampling": {
+            "mode": "all" if all_slices or len(selected_indices) == len(assets) else "sampled",
+            "source_slices": len(assets),
+            "cached_slices": len(frames),
+            "max_slices": max_slices,
+            "selected_z_indices": selected_indices,
+        },
+        "contrast": contrast,
+        "frames": frames,
+        "byte_size": directory_size(output_dir),
+    }
+
+
 def write_slice_cache(
     root_dir: Path,
     source_path: Path,
@@ -2525,6 +2723,31 @@ def run_convert(args: argparse.Namespace) -> int:
 def run_slices(args: argparse.Namespace) -> int:
     root_dir = Path(args.root).expanduser() / args.slug
     readiness = read_conversion_readiness_manifest(root_dir)
+    if args.tiff_series:
+        groups = select_tiff_series_groups(readiness, args.asset, args.all_ready, args.series_min_planes)
+        manifest_path = slice_manifest_path(root_dir)
+        for index, series in enumerate(groups, start=1):
+            print(f"[{index}/{len(groups)}] Generating TIFF-series slice cache: {series['source_relative_path']}", flush=True)
+            cache = write_tiff_series_slice_cache(
+                root_dir=root_dir,
+                series=series,
+                max_slices=args.max_slices,
+                all_slices=args.all_slices,
+                max_width=args.max_width,
+                max_height=args.max_height,
+            )
+            manifest = update_slice_manifest(root_dir, readiness["dataset"], cache)
+            manifest_path = write_slice_manifest(root_dir, manifest)
+            print(
+                f"  cached {cache['sampling']['cached_slices']}/{cache['sampling']['source_slices']} planes "
+                f"({cache['byte_size'] / (1024**2):.1f} MiB)",
+                flush=True,
+            )
+        write_pilot_index(Path(args.root).expanduser())
+        print(f"Slice manifest: {manifest_path}")
+        print(f"Generated TIFF series caches: {len(groups)}")
+        return 0
+
     assets = select_slice_assets(readiness, args.asset, args.all_ready)
     manifest_path = slice_manifest_path(root_dir)
     asset_state_path = root_dir / "metadata" / "asset-state-manifest.json"
@@ -3040,6 +3263,8 @@ def build_parser() -> argparse.ArgumentParser:
     slices.add_argument("--root", default=str(DEFAULT_ROOT), help=f"Data root. Default: {DEFAULT_ROOT}")
     slices.add_argument("--asset", help="Relative asset path. Defaults to the smallest ready TIFF/MRC asset.")
     slices.add_argument("--all-ready", action="store_true", help="Generate caches for every ready TIFF/MRC asset.")
+    slices.add_argument("--tiff-series", action="store_true", help="Treat numbered single-plane TIFF files as one logical z-stack.")
+    slices.add_argument("--series-min-planes", type=int, default=16, help="Minimum planes required for TIFF-series grouping. Default: 16.")
     slices.add_argument("--max-slices", type=int, default=96, help="Maximum sampled planes to cache. Default: 96.")
     slices.add_argument("--all-slices", action="store_true", help="Cache every source plane instead of sampling.")
     slices.add_argument("--max-width", type=int, default=960, help="Maximum generated PNG width. Default: 960.")

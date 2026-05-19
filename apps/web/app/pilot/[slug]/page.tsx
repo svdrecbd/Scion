@@ -40,6 +40,12 @@ function dimensionLabel(dimensions: Record<string, string | number> | undefined)
   return `${valueLabel(dimensions.x)} x ${valueLabel(dimensions.y)} x ${valueLabel(dimensions.z)}`;
 }
 
+function cacheDimensions(cache: { source_shape_zyx: number[] }): Record<string, number> | undefined {
+  const [z, y, x] = cache.source_shape_zyx;
+  if (!z || !y || !x) return undefined;
+  return { x, y, z };
+}
+
 export default async function PilotDatasetPage({ params }: PageProps) {
   const { slug } = await params;
   const [index, readiness, previews, derivatives, sliceManifest, advisory] = await Promise.all([
@@ -217,6 +223,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
                 {sliceCaches.map((cache) => {
                   const readyAsset = readyAssetBySource.get(cache.source_relative_path);
                   const derivative = derivativeBySource.get(cache.source_relative_path);
+                  const dimensions = readyAsset?.dimensions ?? cacheDimensions(cache);
                   const cacheLabel =
                     cache.sampling.mode === "all" ||
                     cache.sampling.cached_slices === cache.sampling.source_slices
@@ -229,7 +236,7 @@ export default async function PilotDatasetPage({ params }: PageProps) {
                         <div className="muted">{cache.source_relative_path}</div>
                       </td>
                       <td>
-                        {cache.source_format} · {dimensionLabel(readyAsset?.dimensions)}
+                        {cache.source_format} · {dimensionLabel(dimensions)}
                         <div className="muted">Scale: {dimensionLabel(cache.physical_voxel_size_nm)} nm</div>
                       </td>
                       <td>
