@@ -9,7 +9,12 @@ __pycache__/
 node_modules/
 .next/
 out/
+dist/
 *.tsbuildinfo
+
+# Rust
+target/
+**/target/
 
 # Env
 .env
@@ -21,4 +26,5 @@ out/
 *.sqlite3
 .run/
 scion-public-data/
+cell-anatomy-public-data/
 public-data/
