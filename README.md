@@ -74,7 +74,9 @@ Verification:
 make check
 ```
 
-`make check` runs API tests, web typecheck, a production build, and a stack smoke test against a temporary seeded Postgres database.
+`make check` runs API and ingestion tests, web and desktop typechecks/builds, Rust volume-engine checks/tests, and a stack smoke test against a temporary seeded Postgres database.
+
+Account login codes are written to `apps/api/.run/auth-codes.log` in local development unless SMTP is configured. Run `make db-migrate` after pulling account-related changes so the `users`, `sessions`, `devices`, and Workbench pairing tables exist before testing sign-in.
 
 ## Design principles
 
@@ -99,6 +101,7 @@ make check
 - [x] Borderline study explorer for "near-miss" transparency.
 - [x] Export Engine (CSV/JSON/BibTeX).
 - [x] Managed local stack, readiness checks, and GitHub Actions CI.
+- [x] Email-code accounts with durable browser sessions and paired Workbench devices.
 
 ## Collaboration notes
 

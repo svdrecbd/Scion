@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cell Anatomy Maternote</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1d252c;
+        --muted: #5f6872;
+        --line: #d9dee3;
+        --paper: #fbfbf8;
+        --panel: #ffffff;
+        --accent: #285c7a;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.55;
+      }
+
+      main {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 48px 24px 72px;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 28px;
+        padding-bottom: 18px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        line-height: 1.15;
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 2rem;
+      }
+
+      h2 {
+        border-top: 1px solid var(--line);
+        font-size: 1.25rem;
+        margin-top: 32px;
+        padding-top: 24px;
+      }
+
+      h3 {
+        font-size: 1rem;
+        margin-top: 20px;
+      }
+
+      p {
+        margin: 12px 0;
+      }
+
+      ul {
+        margin: 10px 0 0;
+        padding-left: 22px;
+      }
+
+      code,
+      pre {
+        background: #eef2f4;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      code {
+        padding: 1px 5px;
+      }
+
+      pre {
+        overflow-x: auto;
+        padding: 14px 16px;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      .meta,
+      .muted {
+        color: var(--muted);
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+      }
+
+      .callout {
+        border-left: 4px solid var(--accent);
+        padding-left: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="meta">Private working note. Keep internal planning here in HTML, not Markdown.</p>
+        <h1>Cell Anatomy Maternote</h1>
+        <p class="muted">Last updated: May 24, 2026</p>
+      </header>
+
+      <section class="panel">
+        <h2>Email And Account Infrastructure</h2>
+        <p>
+          Current local account testing does not send real email. Login codes are written to
+          <code>apps/api/.run/auth-codes.log</code>. The configured placeholder sender is
+          <code>Cell Anatomy &lt;no-reply@cell-anatomy.local&gt;</code>.
+        </p>
+        <p>
+          Production needs two related but separate pieces: human inboxes for the team and support flow,
+          and a transactional sender for login codes.
+        </p>
+      </section>
+
+      <section>
+        <h2>Recommended Setup</h2>
+        <h3>Human Email</h3>
+        <p>
+          Use one normal mailbox provider for the two lead inboxes, plus aliases or groups that forward
+          into those inboxes. Google Workspace is the default recommendation if the leads already use Gmail.
+          Fastmail is a reasonable cheaper option.
+        </p>
+        <pre><code>lead1@cellanatomy.org
+lead2@cellanatomy.org
+
+hello@cellanatomy.org      -> both leads
+feedback@cellanatomy.org   -> both leads
+support@cellanatomy.org    -> both leads
+accounts@cellanatomy.org   -> both leads or admin
+security@cellanatomy.org   -> owner/admin + technical lead
+privacy@cellanatomy.org    -> owner/admin + technical lead</code></pre>
+
+        <h3>Transactional Email</h3>
+        <p>
+          Use a transactional provider for login codes instead of sending from a personal or shared inbox.
+          Start with Resend for cost and simplicity; consider Postmark later if deliverability becomes the
+          main concern.
+        </p>
+        <pre><code>SCION_AUTH_EMAIL_FROM="Cell Anatomy &lt;accounts@cellanatomy.org&gt;"
+SCION_AUTH_SMTP_HOST=smtp.provider.com
+SCION_AUTH_SMTP_PORT=587
+SCION_AUTH_SMTP_USERNAME=...
+SCION_AUTH_SMTP_PASSWORD=...
+SCION_AUTH_SMTP_STARTTLS=true</code></pre>
+      </section>
+
+      <section>
+        <h2>Estimated Cost</h2>
+        <ul>
+          <li>Domain: roughly $10-20/year if we do not already own the final domain.</li>
+          <li>Google Workspace: about $14-17/month for two users, depending on annual versus monthly billing.</li>
+          <li>Fastmail alternative: about $10-12/month for two users.</li>
+          <li>Resend transactional email: free at first if traffic stays within the free tier; about $20/month later.</li>
+          <li>Postmark transactional email alternative: about $15/month starting tier.</li>
+        </ul>
+        <p class="callout">
+          Practical starting budget: about $14-17/month plus the domain. If/when paid transactional email is needed,
+          expect about $34-37/month plus the domain.
+        </p>
+      </section>
+
+      <section>
+        <h2>DNS Requirements</h2>
+        <p>
+          The domain needs standard email authentication so Gmail, Outlook, and other receivers trust account emails.
+        </p>
+        <ul>
+          <li><strong>MX</strong>: routes human inbox mail to the mailbox provider.</li>
+          <li><strong>SPF</strong>: authorizes the mailbox provider and transactional provider to send for the domain.</li>
+          <li><strong>DKIM</strong>: cryptographic signing records from each provider.</li>
+          <li><strong>DMARC</strong>: policy and reporting layer built on SPF/DKIM.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Needed From Leads</h2>
+        <ul>
+          <li>Final domain choice, for example <code>cellanatomy.org</code> or another approved domain.</li>
+          <li>Human mailbox provider choice: Google Workspace, Fastmail, Proton, or another provider.</li>
+          <li>The two lead inbox names.</li>
+          <li>Approval for aliases: <code>hello@</code>, <code>feedback@</code>, <code>support@</code>, <code>accounts@</code>, <code>security@</code>, <code>privacy@</code>.</li>
+          <li>Routing decision for each alias. Simple default: public/support aliases go to both leads; security/privacy go to owner/admin plus technical lead.</li>
+          <li>DNS access, or permission for the technical setup person to provide records that the domain owner adds.</li>
+          <li>Billing owner for Workspace/Fastmail and Resend/Postmark.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Product Implications</h2>
+        <p>
+          This keeps the account system simple while still giving us a credible path for user support,
+          login-code delivery, feedback collection, privacy contact, and future GitHub/OAuth integrations if
+          those become necessary later.
+        </p>
+        <p>
+          No triage system is needed now. A shared inbox or aliases funneling into two lead inboxes are enough
+          until volume proves otherwise.
+        </p>
+      </section>
+
+      <section>
+        <h2>Reference Links</h2>
+        <ul>
+          <li><a href="https://workspace.google.com/business/">Google Workspace pricing</a></li>
+          <li><a href="https://www.fastmail.com/pricing/us/">Fastmail pricing</a></li>
+          <li><a href="https://resend.com/docs/knowledge-base/what-is-resend-pricing">Resend pricing</a></li>
+          <li><a href="https://postmarkapp.com/pricing">Postmark pricing</a></li>
+          <li><a href="https://support.google.com/a/answer/81126">Google sender guidelines</a></li>
+          <li><a href="https://dmarc.org/overview/">DMARC overview</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

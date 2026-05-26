@@ -183,6 +183,9 @@ export function Navbar({ showPilot = false }: NavbarProps) {
               <Link href="/plan" className="nav-link">
                 Plan
               </Link>
+              <Link href="/caos" className="nav-link">
+                CAOS
+              </Link>
               {pilotVisible ? (
                 <Link href="/pilot" className="nav-link">
                   Data

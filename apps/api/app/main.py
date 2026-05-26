@@ -26,6 +26,7 @@ from app.observability import (
     response_log_level,
 )
 from app.readiness import readiness_snapshot
+from app.routes.auth import router as auth_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.signups import router as signups_router
@@ -139,6 +140,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router, prefix=settings.api_prefix)
+app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(datasets_router, prefix=settings.api_prefix)
 app.include_router(signups_router, prefix=settings.api_prefix)
 

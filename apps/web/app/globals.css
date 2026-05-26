@@ -65,6 +65,7 @@ main {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 18px;
   padding: 16px var(--page-gutter);
   max-width: var(--page-max-width);
   margin: 0 auto;
@@ -86,6 +87,7 @@ main {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
   font-family: var(--font-display);
   font-weight: 400;
   font-size: 1.25rem;
@@ -95,7 +97,10 @@ main {
 .nav-links {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 20px;
+  min-width: 0;
 }
 
 .nav-link,
@@ -115,6 +120,25 @@ main {
 .nav-link:hover,
 .nav-link-btn:hover {
   color: var(--foreground);
+}
+
+@media (max-width: 720px) {
+  .navbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .nav-links {
+    justify-content: flex-start;
+    gap: 12px 16px;
+    width: 100%;
+  }
+
+  .nav-link,
+  .nav-link-btn {
+    font-size: 0.95rem;
+  }
 }
 
 .nav-search-form {
@@ -238,7 +262,9 @@ main {
 }
 
 .analytics-table-wrap {
-  overflow-x: auto;
+  max-width: 100%;
+  overflow: auto hidden;
+  overscroll-behavior-inline: contain;
 }
 
 .pilot-readiness-stats {
@@ -346,6 +372,7 @@ main {
   padding: 24px;
   background: var(--accent);
   border: 1px solid var(--rule-strong);
+  min-width: 0;
 }
 
 .figure-plate-header {
@@ -777,9 +804,11 @@ main {
 .instrument-envelope {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .instrument-envelope-chart-wrap {
+  min-width: 0;
   overflow-x: auto;
   padding: 16px;
   border: 1px solid var(--border);
@@ -869,6 +898,7 @@ main {
 .instrument-envelope-ledger {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .instrument-envelope-ledger-row {
@@ -885,6 +915,24 @@ main {
 .instrument-envelope-ledger-row strong {
   font-family: var(--font-display);
   font-weight: 500;
+}
+
+@media (max-width: 760px) {
+  .instrument-envelope-ledger-row {
+    grid-template-columns: 12px minmax(0, 1fr);
+    gap: 4px 8px;
+  }
+
+  .instrument-envelope-ledger-row .plot-legend-swatch {
+    grid-row: 1 / span 5;
+    align-self: start;
+    margin-top: 5px;
+  }
+
+  .instrument-envelope-ledger-row strong,
+  .instrument-envelope-ledger-row span:not(.plot-legend-swatch) {
+    grid-column: 2;
+  }
 }
 
 .plot-control-bar {
@@ -1083,12 +1131,139 @@ main {
 }
 
 .landing-hero {
-  width: min(calc(100vw - (2 * var(--page-gutter))), 1540px);
-  max-width: none;
+  width: 100%;
+  max-width: var(--page-max-width);
 }
 
 .landing-hero p {
-  max-width: 1320px;
+  max-width: 960px;
+}
+
+.landing-hero-visual {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  align-items: center;
+  gap: 28px;
+  padding: 18px 0 10px;
+}
+
+.landing-hero-copy {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.landing-hero-copy p {
+  max-width: 920px;
+}
+
+.landing-hero-media,
+.caos-screenshot {
+  position: relative;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  background: #050505;
+}
+
+.landing-hero-media {
+  display: grid;
+  gap: 8px;
+}
+
+.landing-hero-media img,
+.caos-screenshot img {
+  display: block;
+  width: 100%;
+}
+
+.landing-hero-media img {
+  height: clamp(220px, 22vw, 320px);
+  object-fit: cover;
+}
+
+.landing-hero-media figcaption {
+  padding: 8px 10px;
+  color: #f7f6ef;
+  background: #050505;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.caos-page {
+  padding-top: 44px;
+}
+
+.caos-hero {
+  grid-template-columns: minmax(280px, 0.62fr) minmax(420px, 0.88fr);
+  align-items: center;
+  gap: 36px;
+  width: min(calc(100vw - (2 * var(--page-gutter))), 1280px);
+  max-width: none;
+}
+
+.caos-hero-copy {
+  display: grid;
+  gap: 12px;
+}
+
+.caos-hero-copy h1 {
+  font-size: clamp(2.8rem, 6vw, 4.8rem);
+}
+
+.caos-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.caos-screenshot {
+  aspect-ratio: 1800 / 1017;
+  max-height: 460px;
+}
+
+.caos-screenshot img {
+  height: 100%;
+  object-fit: contain;
+}
+
+.caos-screenshot figcaption {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  padding: 7px 9px;
+  background: rgba(5, 5, 5, 0.72);
+  color: #f7f6ef;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.caos-roadmap {
+  display: grid;
+  gap: 18px;
+}
+
+.caos-roadmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 920px) {
+  .landing-hero-visual,
+  .caos-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .caos-page {
+    padding-top: 32px;
+  }
+
+  .caos-screenshot {
+    max-height: none;
+  }
 }
 
 .panel {

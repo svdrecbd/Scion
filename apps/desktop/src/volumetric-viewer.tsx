@@ -2,6 +2,44 @@
 
 import { useEffect, useRef, useState, useMemo } from "react";
 
+type CachedSlice = {
+  buffer: ArrayBuffer;
+  width: number;
+  height: number;
+  dtype: string;
+  byteLength: number;
+  loadedAt: number;
+};
+
+export type VoxelPoint = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+export type MeasurementOverlay = {
+  id: string;
+  label: string;
+  note?: string;
+  axis: "z" | "y" | "x";
+  slice: number;
+  start: VoxelPoint;
+  end: VoxelPoint;
+  distanceUm: number;
+};
+
+export type RoiOverlay = {
+  id: string;
+  label: string;
+  kind: "point" | "box";
+  category: string;
+  axis: "z" | "y" | "x";
+  slice: number;
+  start: VoxelPoint;
+  end?: VoxelPoint;
+  color?: string;
+};
+
 type VolumetricViewerProps = {
   dataset: string;
   asset: string;
@@ -28,6 +66,98 @@ type VolumetricViewerProps = {
   onLoadedMetadata?: (info: { width: number; height: number; dtype: string; maxPossible: number }) => void;
   onProbeChange?: (probe: { px: number; py: number; pz: number; xUm: number; yUm: number; zUm: number; val: number } | null) => void;
   onSliceLoaded?: (data: Uint8Array | Uint16Array) => void;
+  onPlanePointSelect?: (point: { x: number; y: number; z: number }) => void;
+  onMeasurementPoint?: (point: VoxelPoint, context: { axis: "z" | "y" | "x"; slice: number }) => void;
+  onLoadingChange?: (loading: boolean) => void;
+  crosshair?: { x: number; y: number; z: number };
+  measurementMode?: boolean;
+  measurements?: MeasurementOverlay[];
+  measurementDraftPoint?: VoxelPoint | null;
+  roiTool?: "off" | "point" | "box";
+  rois?: RoiOverlay[];
+  roiDraftPoint?: VoxelPoint | null;
+  onRoiPoint?: (point: VoxelPoint, context: { axis: "z" | "y" | "x"; slice: number }) => void;
+  title?: string;
+  variant?: "stage" | "tile";
+};
+
+const SLICE_CACHE_MAX_BYTES = 160 * 1024 * 1024;
+const SLICE_CACHE_MAX_ENTRIES = 48;
+const sliceCache = new Map<string, CachedSlice>();
+let sliceCacheBytes = 0;
+
+const getSliceCacheKey = (dataset: string, asset: string, axis: "z" | "y" | "x", slice: number) =>
+  `${dataset}::${asset}::${axis}::${slice}`;
+
+const getSliceUrl = (dataset: string, asset: string, axis: "z" | "y" | "x", slice: number) =>
+  `http://127.0.0.1:8080/api/volume/slice?dataset=${encodeURIComponent(
+    dataset
+  )}&asset=${encodeURIComponent(asset)}&axis=${axis}&slice=${slice}`;
+
+const formatMeasurementDistance = (distanceUm: number) => {
+  if (!Number.isFinite(distanceUm)) return "";
+  if (distanceUm < 1) return `${(distanceUm * 1000).toFixed(1)} nm`;
+  if (distanceUm < 100) return `${distanceUm.toFixed(3)} µm`;
+  return `${distanceUm.toFixed(1)} µm`;
+};
+
+const touchCachedSlice = (key: string, entry: CachedSlice) => {
+  sliceCache.delete(key);
+  sliceCache.set(key, { ...entry, loadedAt: Date.now() });
+};
+
+const pruneSliceCache = () => {
+  while (sliceCache.size > SLICE_CACHE_MAX_ENTRIES || sliceCacheBytes > SLICE_CACHE_MAX_BYTES) {
+    const oldestKey = sliceCache.keys().next().value as string | undefined;
+    if (!oldestKey) return;
+    const oldest = sliceCache.get(oldestKey);
+    if (oldest) {
+      sliceCacheBytes -= oldest.byteLength;
+    }
+    sliceCache.delete(oldestKey);
+  }
+};
+
+const putCachedSlice = (key: string, entry: CachedSlice) => {
+  const existing = sliceCache.get(key);
+  if (existing) {
+    sliceCacheBytes -= existing.byteLength;
+  }
+  sliceCache.set(key, entry);
+  sliceCacheBytes += entry.byteLength;
+  pruneSliceCache();
+};
+
+const fetchSlicePayload = async (
+  dataset: string,
+  asset: string,
+  axis: "z" | "y" | "x",
+  slice: number,
+  signal?: AbortSignal
+) => {
+  const key = getSliceCacheKey(dataset, asset, axis, slice);
+  const cached = sliceCache.get(key);
+  if (cached) {
+    touchCachedSlice(key, cached);
+    return { ...cached, fromCache: true };
+  }
+
+  const res = await fetch(getSliceUrl(dataset, asset, axis, slice), { signal });
+  if (!res.ok) {
+    throw new Error(`Volumetric sidecar returned status: ${res.status}`);
+  }
+
+  const buffer = await res.arrayBuffer();
+  const entry: CachedSlice = {
+    buffer,
+    width: Number(res.headers.get("x-width") || 0),
+    height: Number(res.headers.get("x-height") || 0),
+    dtype: res.headers.get("x-dtype") || "uint8",
+    byteLength: buffer.byteLength,
+    loadedAt: Date.now(),
+  };
+  putCachedSlice(key, entry);
+  return { ...entry, fromCache: false };
 };
 
 // Simple full-screen quad vertex shader
@@ -268,7 +398,21 @@ export function VolumetricViewer({
   onLoadedMetadata,
   onProbeChange,
   onSliceLoaded,
+  onPlanePointSelect,
+  onMeasurementPoint,
+  onLoadingChange,
+  crosshair,
+  measurementMode = false,
+  measurements = [],
+  measurementDraftPoint = null,
+  roiTool = "off",
+  rois = [],
+  roiDraftPoint = null,
+  onRoiPoint,
+  title,
+  variant = "stage",
 }: VolumetricViewerProps) {
+  const stageWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   
@@ -288,6 +432,7 @@ export function VolumetricViewer({
   // Loading states
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const onLoadingChangeRef = useRef(onLoadingChange);
   
   // 2D Dimensions
   const [sliceWidth, setSliceWidth] = useState(0);
@@ -310,7 +455,17 @@ export function VolumetricViewer({
 
   // Observer client size
   const [canvasDisplay, setCanvasDisplay] = useState({ width: 0, height: 0 });
+  const [stageDisplay, setStageDisplay] = useState({ width: 0, height: 0 });
   const [drawRevision, setDrawRevision] = useState(0);
+
+  useEffect(() => {
+    onLoadingChangeRef.current = onLoadingChange;
+  }, [onLoadingChange]);
+
+  useEffect(() => {
+    onLoadingChangeRef.current?.(loading);
+    return () => onLoadingChangeRef.current?.(false);
+  }, [loading]);
 
   // Helper compiler
   const compileShader = (gl: WebGL2RenderingContext, type: number, src: string) => {
@@ -334,7 +489,7 @@ export function VolumetricViewer({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const gl = canvas.getContext("webgl2");
+    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) {
       setError("WebGL2 is not supported or enabled in this browser.");
       return;
@@ -444,29 +599,23 @@ export function VolumetricViewer({
   useEffect(() => {
     if (viewMode !== "2d") return;
     let cancelled = false;
+    const controller = new AbortController();
+    const cacheKey = getSliceCacheKey(dataset, asset, axis, slice);
+    const cached = sliceCache.get(cacheKey);
 
     async function fetchSlice() {
-      setLoading(true);
+      setLoading(!cached);
       setError(null);
       setInspectCoords(null);
       setInspectVal(null);
 
       try {
-        const url = `http://127.0.0.1:8080/api/volume/slice?dataset=${encodeURIComponent(
-          dataset
-        )}&asset=${encodeURIComponent(asset)}&axis=${axis}&slice=${slice}`;
-
-        const res = await fetch(url);
-        if (!res.ok) {
-          throw new Error(`Volumetric sidecar returned status: ${res.status}`);
-        }
-
-        const buffer = await res.arrayBuffer();
+        const payload = await fetchSlicePayload(dataset, asset, axis, slice, controller.signal);
         if (cancelled) return;
 
-        const hWidth = Number(res.headers.get("x-width") || 0);
-        const hHeight = Number(res.headers.get("x-height") || 0);
-        const hDtype = res.headers.get("x-dtype") || "uint8";
+        const hWidth = payload.width;
+        const hHeight = payload.height;
+        const hDtype = payload.dtype;
 
         setSliceWidth(hWidth);
         setSliceHeight(hHeight);
@@ -476,10 +625,10 @@ export function VolumetricViewer({
         let maxPossible = 255;
 
         if (hDtype.includes("16") || hDtype === "uint16") {
-          typedArray = new Uint16Array(buffer);
+          typedArray = new Uint16Array(payload.buffer);
           maxPossible = 65535;
         } else {
-          typedArray = new Uint8Array(buffer);
+          typedArray = new Uint8Array(payload.buffer);
           maxPossible = 255;
         }
         sliceDataRef.current = typedArray;
@@ -527,7 +676,19 @@ export function VolumetricViewer({
           }
         }
         setDrawRevision((prev) => prev + 1);
+        const axisMax = axis === "z" ? zMax : axis === "y" ? yMax : xMax;
+        for (const nextSlice of [slice - 1, slice + 1]) {
+          if (nextSlice < 0 || nextSlice >= axisMax) continue;
+          const nextKey = getSliceCacheKey(dataset, asset, axis, nextSlice);
+          if (sliceCache.has(nextKey)) continue;
+          void fetchSlicePayload(dataset, asset, axis, nextSlice).catch(() => {
+            // Prefetch is opportunistic and should never surface as viewer error.
+          });
+        }
       } catch (err: any) {
+        if (err?.name === "AbortError") {
+          return;
+        }
         if (!cancelled) {
           setError(err.message || "Failed to load voxel slice from the sidecar.");
         }
@@ -542,13 +703,15 @@ export function VolumetricViewer({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [dataset, asset, axis, slice, viewMode]);
+  }, [dataset, asset, axis, slice, viewMode, zMax, yMax, xMax]);
 
   // Fetch 3D Downsampled Volume
   useEffect(() => {
     if (viewMode !== "3d") return;
     let cancelled = false;
+    const controller = new AbortController();
 
     async function fetch3DVolume() {
       setLoading(true);
@@ -559,7 +722,7 @@ export function VolumetricViewer({
           dataset
         )}&asset=${encodeURIComponent(asset)}&downsample=${downsample}`;
 
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) {
           throw new Error(`Volumetric sidecar returned status: ${res.status}`);
         }
@@ -632,6 +795,9 @@ export function VolumetricViewer({
         }
         setDrawRevision((prev) => prev + 1);
       } catch (err: any) {
+        if (err?.name === "AbortError") {
+          return;
+        }
         if (!cancelled) {
           setError(err.message || "Failed to stream 3D volume buffer.");
         }
@@ -646,6 +812,7 @@ export function VolumetricViewer({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [dataset, asset, downsample, viewMode]);
 
@@ -800,6 +967,34 @@ export function VolumetricViewer({
     drawRevision,
   ]);
 
+  useEffect(() => {
+    const element = stageWrapRef.current;
+    if (!element) return;
+
+    const updateSize = () => {
+      setStageDisplay({
+        width: element.clientWidth,
+        height: element.clientHeight,
+      });
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setStageDisplay({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
+    });
+
+    observer.observe(element);
+    updateSize();
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
   // Size listener to update observed display size
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -823,6 +1018,49 @@ export function VolumetricViewer({
     };
   }, []);
 
+  const resolveSlicePoint = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    const data = sliceDataRef.current;
+    if (!canvas || !data || sliceWidth === 0 || sliceHeight === 0) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const xRatio = (e.clientX - rect.left) / rect.width;
+    const yRatio = (e.clientY - rect.top) / rect.height;
+
+    const px = Math.floor(xRatio * sliceWidth);
+    const py = Math.floor(yRatio * sliceHeight);
+
+    if (px < 0 || px >= sliceWidth || py < 0 || py >= sliceHeight) return null;
+
+    const idx = py * sliceWidth + px;
+    if (idx >= data.length) return null;
+
+    let xVal = 0;
+    let yVal = 0;
+    let zVal = 0;
+
+    if (axis === "z") {
+      xVal = px;
+      yVal = py;
+      zVal = slice;
+    } else if (axis === "y") {
+      xVal = px;
+      zVal = py;
+      yVal = slice;
+    } else {
+      yVal = px;
+      zVal = py;
+      xVal = slice;
+    }
+
+    return {
+      px,
+      py,
+      val: data[idx],
+      point: { x: xVal, y: yVal, z: zVal },
+    };
+  };
+
   // Pixel inspection mouse coordinates handler
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (viewMode === "3d") {
@@ -839,54 +1077,29 @@ export function VolumetricViewer({
       return;
     }
 
-    const canvas = canvasRef.current;
-    const data = sliceDataRef.current;
-    if (!canvas || !data || sliceWidth === 0 || sliceHeight === 0) return;
+    const resolved = resolveSlicePoint(e);
+    if (!resolved) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const xRatio = (e.clientX - rect.left) / rect.width;
-    const yRatio = (e.clientY - rect.top) / rect.height;
+    setInspectCoords({ x: resolved.px, y: resolved.py });
+    setInspectVal(resolved.val);
 
-    const px = Math.floor(xRatio * sliceWidth);
-    const py = Math.floor(yRatio * sliceHeight);
+    if (onProbeChange) {
+      const vx = Number(physicalVoxelSizeNm.x || 1.0);
+      const vy = Number(physicalVoxelSizeNm.y || 1.0);
+      const vz = Number(physicalVoxelSizeNm.z || 1.0);
+      const xUm = (resolved.point.x * vx) / 1000.0;
+      const yUm = (resolved.point.y * vy) / 1000.0;
+      const zUm = (resolved.point.z * vz) / 1000.0;
 
-    if (px >= 0 && px < sliceWidth && py >= 0 && py < sliceHeight) {
-      setInspectCoords({ x: px, y: py });
-      const idx = py * sliceWidth + px;
-      if (idx < data.length) {
-        const val = data[idx];
-        setInspectVal(val);
-
-        if (onProbeChange) {
-          const vx = Number(physicalVoxelSizeNm.x || 1.0);
-          const vy = Number(physicalVoxelSizeNm.y || 1.0);
-          const vz = Number(physicalVoxelSizeNm.z || 1.0);
-
-          let xVal = 0;
-          let yVal = 0;
-          let zVal = 0;
-
-          if (axis === "z") {
-            xVal = px;
-            yVal = py;
-            zVal = slice;
-          } else if (axis === "y") {
-            xVal = px;
-            zVal = py;
-            yVal = slice;
-          } else {
-            yVal = px;
-            zVal = py;
-            xVal = slice;
-          }
-
-          const xUm = (xVal * vx) / 1000.0;
-          const yUm = (yVal * vy) / 1000.0;
-          const zUm = (zVal * vz) / 1000.0;
-
-          onProbeChange({ px: xVal, py: yVal, pz: zVal, xUm, yUm, zUm, val });
-        }
-      }
+      onProbeChange({
+        px: resolved.point.x,
+        py: resolved.point.y,
+        pz: resolved.point.z,
+        xUm,
+        yUm,
+        zUm,
+        val: resolved.val,
+      });
     }
   };
 
@@ -899,6 +1112,26 @@ export function VolumetricViewer({
 
   const handleMouseUp = () => {
     isDraggingRef.current = false;
+  };
+
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (viewMode !== "2d") return;
+    const resolved = resolveSlicePoint(e);
+    if (!resolved) return;
+
+    if (measurementMode && onMeasurementPoint) {
+      onMeasurementPoint(resolved.point, { axis, slice });
+      return;
+    }
+
+    if (roiTool !== "off" && onRoiPoint) {
+      onRoiPoint(resolved.point, { axis, slice });
+      return;
+    }
+
+    if (onPlanePointSelect) {
+      onPlanePointSelect(resolved.point);
+    }
   };
 
   const handleMouseLeave = () => {
@@ -925,6 +1158,31 @@ export function VolumetricViewer({
       return (yMax * vy) / (zMax * vz);
     }
   }, [physicalVoxelSizeNm, axis, zMax, yMax, xMax, sliceWidth, sliceHeight]);
+
+  const fittedCanvasSize = useMemo(() => {
+    if (viewMode !== "2d") {
+      return { width: "100%", height: "100%" };
+    }
+
+    const boundsWidth = stageDisplay.width;
+    const boundsHeight = stageDisplay.height;
+    const aspect = Number.isFinite(aspect2D) && aspect2D > 0 ? aspect2D : 1;
+    if (boundsWidth <= 0 || boundsHeight <= 0) {
+      return { width: "100%", height: "100%" };
+    }
+
+    let width = boundsWidth;
+    let height = width / aspect;
+    if (height > boundsHeight) {
+      height = boundsHeight;
+      width = height * aspect;
+    }
+
+    return {
+      width: `${Math.max(1, Math.floor(width))}px`,
+      height: `${Math.max(1, Math.floor(height))}px`,
+    };
+  }, [viewMode, stageDisplay.width, stageDisplay.height, aspect2D]);
 
   // Compute scale bar details based on actual voxel metadata, displayed width, and physical scale steps
   const scaleBar = useMemo(() => {
@@ -970,13 +1228,113 @@ export function VolumetricViewer({
     return { widthCss, label };
   }, [physicalVoxelSizeNm, axis, sliceWidth, canvasDisplay.width, viewMode]);
 
+  const crosshairPosition = useMemo(() => {
+    if (!crosshair || viewMode !== "2d") return null;
+
+    if (axis === "z") {
+      return {
+        x: xMax > 1 ? (crosshair.x / (xMax - 1)) * 100 : 50,
+        y: yMax > 1 ? (crosshair.y / (yMax - 1)) * 100 : 50,
+      };
+    }
+    if (axis === "y") {
+      return {
+        x: xMax > 1 ? (crosshair.x / (xMax - 1)) * 100 : 50,
+        y: zMax > 1 ? (crosshair.z / (zMax - 1)) * 100 : 50,
+      };
+    }
+    return {
+      x: yMax > 1 ? (crosshair.y / (yMax - 1)) * 100 : 50,
+      y: zMax > 1 ? (crosshair.z / (zMax - 1)) * 100 : 50,
+    };
+  }, [crosshair, viewMode, axis, xMax, yMax, zMax]);
+
+  const projectPointToPlane = (point: VoxelPoint) => {
+    if (axis === "z") {
+      return {
+        x: xMax > 1 ? (point.x / (xMax - 1)) * 100 : 50,
+        y: yMax > 1 ? (point.y / (yMax - 1)) * 100 : 50,
+      };
+    }
+    if (axis === "y") {
+      return {
+        x: xMax > 1 ? (point.x / (xMax - 1)) * 100 : 50,
+        y: zMax > 1 ? (point.z / (zMax - 1)) * 100 : 50,
+      };
+    }
+    return {
+      x: yMax > 1 ? (point.y / (yMax - 1)) * 100 : 50,
+      y: zMax > 1 ? (point.z / (zMax - 1)) * 100 : 50,
+    };
+  };
+
+  const visibleMeasurements = useMemo(() => {
+    if (viewMode !== "2d") return [];
+    return measurements
+      .filter((measurement) => measurement.axis === axis && measurement.slice === slice)
+      .map((measurement) => ({
+        ...measurement,
+        startPlane: projectPointToPlane(measurement.start),
+        endPlane: projectPointToPlane(measurement.end),
+      }));
+  }, [measurements, viewMode, axis, slice, xMax, yMax, zMax]);
+
+  const visibleRois = useMemo(() => {
+    if (viewMode !== "2d") return [];
+    return rois
+      .filter((roi) => roi.axis === axis && roi.slice === slice)
+      .map((roi) => ({
+        ...roi,
+        startPlane: projectPointToPlane(roi.start),
+        endPlane: roi.end ? projectPointToPlane(roi.end) : null,
+      }));
+  }, [rois, viewMode, axis, slice, xMax, yMax, zMax]);
+
+  const draftPlanePoint = useMemo(() => {
+    if (!measurementDraftPoint || viewMode !== "2d") return null;
+    const onPlane =
+      (axis === "z" && measurementDraftPoint.z === slice) ||
+      (axis === "y" && measurementDraftPoint.y === slice) ||
+      (axis === "x" && measurementDraftPoint.x === slice);
+    return onPlane ? projectPointToPlane(measurementDraftPoint) : null;
+  }, [measurementDraftPoint, viewMode, axis, slice, xMax, yMax, zMax]);
+
+  const roiDraftPlanePoint = useMemo(() => {
+    if (!roiDraftPoint || viewMode !== "2d") return null;
+    const onPlane =
+      (axis === "z" && roiDraftPoint.z === slice) ||
+      (axis === "y" && roiDraftPoint.y === slice) ||
+      (axis === "x" && roiDraftPoint.x === slice);
+    return onPlane ? projectPointToPlane(roiDraftPoint) : null;
+  }, [roiDraftPoint, viewMode, axis, slice, xMax, yMax, zMax]);
+
+  const interactionCursor =
+    viewMode === "3d"
+      ? "grab"
+      : measurementMode
+      ? "cell"
+      : roiTool !== "off"
+      ? "copy"
+      : "crosshair";
+
   return (
-    <div className="workbench-stage panel" style={{ background: "#050505", border: "none", position: "relative", flex: 1, display: "flex", flexDirection: "column", height: "100%", padding: 0 }}>
+    <div
+      className="workbench-stage panel"
+      style={{
+        background: "#050505",
+        border: variant === "tile" ? "1px solid rgba(251, 248, 239, 0.16)" : "none",
+        position: "relative",
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        minHeight: 0,
+        padding: 0,
+      }}
+    >
       {loading ? (
-        <div className="stage-overlay" style={{ position: "absolute", inset: 0, zIndex: 10, background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-display)", fontSize: 13, gap: 10 }}>
-          <span className="pulsing-text" style={{ color: "var(--atlas-blue-dark)" }}>
-            {viewMode === "3d" ? "Streaming and downsampling 3D volume..." : "Streaming binary array slice..."}
-          </span>
+        <div className="stage-load-serial">
+          <span>STREAM</span>
         </div>
       ) : null}
 
@@ -990,15 +1348,15 @@ export function VolumetricViewer({
         </div>
       ) : null}
 
-      <div className="stage-canvas-wrap" style={{ position: "relative", width: "100%", flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 0 }}>
+      <div ref={stageWrapRef} className="stage-canvas-wrap" style={{ position: "relative", width: "100%", flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 0 }}>
         {/* Render centered relative container with corrected aspect ratios */}
         <div
           style={{
             position: "relative",
             maxWidth: "100%",
             maxHeight: "100%",
-            width: "100%",
-            height: "100%",
+            width: fittedCanvasSize.width,
+            height: fittedCanvasSize.height,
             display: "flex",
             justifyContent: "center",
             alignItems: "center",
@@ -1010,14 +1368,183 @@ export function VolumetricViewer({
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseLeave}
+            onClick={handleClick}
             style={{
               width: "100%",
               height: "100%",
-              cursor: viewMode === "3d" ? "grab" : "crosshair",
+              cursor: interactionCursor,
               imageRendering: "pixelated",
               objectFit: "contain",
             }}
           />
+
+          {title ? (
+            <div
+              style={{
+                position: "absolute",
+                top: 10,
+                left: 10,
+                background: "rgba(0,0,0,0.68)",
+                border: "1px solid rgba(251, 248, 239, 0.2)",
+                color: "#fbf8ef",
+                fontFamily: "var(--font-display)",
+                fontSize: variant === "tile" ? 10 : 11,
+                fontWeight: 600,
+                letterSpacing: 0,
+                padding: "4px 7px",
+                pointerEvents: "none",
+                textTransform: "uppercase",
+              }}
+            >
+              {title}
+            </div>
+          ) : null}
+
+          {crosshairPosition && !error && !loading ? (
+            <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  bottom: 0,
+                  left: `${crosshairPosition.x}%`,
+                  width: 1,
+                  background: "rgba(198, 111, 45, 0.86)",
+                  boxShadow: "0 0 0 1px rgba(0,0,0,0.35)",
+                }}
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  top: `${crosshairPosition.y}%`,
+                  height: 1,
+                  background: "rgba(198, 111, 45, 0.86)",
+                  boxShadow: "0 0 0 1px rgba(0,0,0,0.35)",
+                }}
+              />
+            </div>
+          ) : null}
+
+          {(visibleMeasurements.length > 0 || draftPlanePoint || visibleRois.length > 0 || roiDraftPlanePoint) && !error ? (
+            <svg
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            >
+              {visibleRois.map((roi) => {
+                const color = roi.color || "rgba(31, 111, 135, 0.96)";
+                if (roi.kind === "box" && roi.endPlane) {
+                  const x = Math.min(roi.startPlane.x, roi.endPlane.x);
+                  const y = Math.min(roi.startPlane.y, roi.endPlane.y);
+                  const width = Math.abs(roi.endPlane.x - roi.startPlane.x);
+                  const height = Math.abs(roi.endPlane.y - roi.startPlane.y);
+                  const safeWidth = Math.max(0.8, width);
+                  const safeHeight = Math.max(0.8, height);
+                  return (
+                    <g key={roi.id}>
+                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="rgba(31, 111, 135, 0.08)" stroke="rgba(255, 255, 255, 0.95)" strokeWidth={0.36} vectorEffect="non-scaling-stroke" />
+                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="none" stroke={color} strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                      <text
+                        x={x + safeWidth / 2}
+                        y={Math.max(2.6, y - 1.1)}
+                        fill="#fbf8ef"
+                        stroke="rgba(0, 0, 0, 0.82)"
+                        strokeWidth={0.5}
+                        paintOrder="stroke"
+                        fontSize={3}
+                        fontFamily="var(--font-display)"
+                        fontWeight={700}
+                        letterSpacing={0}
+                        textAnchor="middle"
+                        vectorEffect="non-scaling-stroke"
+                      >
+                        {roi.label}
+                      </text>
+                    </g>
+                  );
+                }
+                return (
+                  <g key={roi.id}>
+                    <circle cx={roi.startPlane.x} cy={roi.startPlane.y} r={1.2} fill={color} stroke="rgba(255,255,255,0.95)" strokeWidth={0.22} vectorEffect="non-scaling-stroke" />
+                    <line x1={roi.startPlane.x - 2.2} y1={roi.startPlane.y} x2={roi.startPlane.x + 2.2} y2={roi.startPlane.y} stroke="rgba(255,255,255,0.9)" strokeWidth={0.14} vectorEffect="non-scaling-stroke" />
+                    <line x1={roi.startPlane.x} y1={roi.startPlane.y - 2.2} x2={roi.startPlane.x} y2={roi.startPlane.y + 2.2} stroke="rgba(255,255,255,0.9)" strokeWidth={0.14} vectorEffect="non-scaling-stroke" />
+                    <text
+                      x={roi.startPlane.x}
+                      y={roi.startPlane.y - 2.8}
+                      fill="#fbf8ef"
+                      stroke="rgba(0, 0, 0, 0.82)"
+                      strokeWidth={0.5}
+                      paintOrder="stroke"
+                      fontSize={3}
+                      fontFamily="var(--font-display)"
+                      fontWeight={700}
+                      letterSpacing={0}
+                      textAnchor="middle"
+                      vectorEffect="non-scaling-stroke"
+                    >
+                      {roi.label}
+                    </text>
+                  </g>
+                );
+              })}
+              {visibleMeasurements.map((measurement) => (
+                <g key={measurement.id}>
+                  <line
+                    x1={measurement.startPlane.x}
+                    y1={measurement.startPlane.y}
+                    x2={measurement.endPlane.x}
+                    y2={measurement.endPlane.y}
+                    stroke="rgba(255, 255, 255, 0.95)"
+                    strokeWidth={0.32}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <line
+                    x1={measurement.startPlane.x}
+                    y1={measurement.startPlane.y}
+                    x2={measurement.endPlane.x}
+                    y2={measurement.endPlane.y}
+                    stroke="rgba(198, 111, 45, 0.92)"
+                    strokeWidth={0.16}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <circle cx={measurement.startPlane.x} cy={measurement.startPlane.y} r={0.75} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <circle cx={measurement.endPlane.x} cy={measurement.endPlane.y} r={0.75} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <text
+                    x={(measurement.startPlane.x + measurement.endPlane.x) / 2}
+                    y={(measurement.startPlane.y + measurement.endPlane.y) / 2}
+                    dx={1.1}
+                    dy={-1.1}
+                    fill="#fbf8ef"
+                    stroke="rgba(0, 0, 0, 0.82)"
+                    strokeWidth={0.5}
+                    paintOrder="stroke"
+                    fontSize={3.1}
+                    fontFamily="var(--font-display)"
+                    fontWeight={700}
+                    letterSpacing={0}
+                    textAnchor="middle"
+                    vectorEffect="non-scaling-stroke"
+                  >
+                    {measurement.label || formatMeasurementDistance(measurement.distanceUm)}
+                  </text>
+                </g>
+              ))}
+              {draftPlanePoint ? (
+                <g>
+                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={1.0} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={1.85} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                </g>
+              ) : null}
+              {roiDraftPlanePoint ? (
+                <g>
+                  <circle cx={roiDraftPlanePoint.x} cy={roiDraftPlanePoint.y} r={1.05} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <rect x={roiDraftPlanePoint.x - 1.7} y={roiDraftPlanePoint.y - 1.7} width={3.4} height={3.4} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                </g>
+              ) : null}
+            </svg>
+          ) : null}
 
           {/* Scale bar display only in 2D Slicing mode */}
           {viewMode === "2d" && scaleBar && sliceWidth > 0 && !error && !loading ? (
@@ -1048,7 +1575,7 @@ export function VolumetricViewer({
                   fontSize: 10,
                   textShadow: "0 1px 3px rgba(0,0,0,0.8)",
                   marginTop: 4,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-display)",
                 }}
               >
                 {scaleBar.label}
@@ -1064,14 +1591,14 @@ export function VolumetricViewer({
                 top: 16,
                 right: 16,
                 background: "rgba(0,0,0,0.6)",
-                border: "1px solid var(--border)",
+                border: "1px solid rgba(251, 248, 239, 0.22)",
                 padding: "4px 8px",
                 borderRadius: 0,
                 fontSize: 10,
-                fontFamily: "monospace",
-                color: "var(--foreground)",
+                fontFamily: "var(--font-display)",
+                color: "#fbf8ef",
                 pointerEvents: "none",
-                letterSpacing: "0.05em",
+                letterSpacing: 0,
                 textTransform: "uppercase"
               }}
             >
@@ -1085,22 +1612,34 @@ export function VolumetricViewer({
         className="workbench-stage-readout"
         style={{
           borderTop: "1px solid var(--border)",
-          padding: "10px 14px",
+          padding: variant === "tile" ? "7px 10px" : "10px 14px",
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          fontSize: 12,
-          fontFamily: "monospace",
-          background: "#080808",
+          gap: 12,
+          fontSize: variant === "tile" ? 10 : 12,
+          fontFamily: "var(--font-display)",
+          background: "rgba(251, 248, 239, 0.94)",
+          color: "#171511",
         }}
       >
-        <div>
-          {viewMode === "2d" ? (
+        <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {variant === "tile" && viewMode === "2d" ? (
+            <>
+              <span>
+                {sliceWidth} x {sliceHeight} ({dtype})
+              </span>
+              <span style={{ margin: "0 8px", color: "#7a7569" }}>|</span>
+              <span>
+                {axis === "z" ? "XY" : axis === "y" ? "XZ" : "YZ"} {slice + 1}
+              </span>
+            </>
+          ) : viewMode === "2d" ? (
             <>
               <span>
                 Grid: {sliceWidth} x {sliceHeight} ({dtype})
               </span>
-              <span style={{ margin: "0 12px", color: "#333" }}>|</span>
+              <span style={{ margin: "0 12px", color: "#7a7569" }}>|</span>
               <span>
                 {axis === "z" ? "Plane XY" : axis === "y" ? "Plane XZ" : "Plane YZ"} Slice {slice + 1}
               </span>
@@ -1110,30 +1649,207 @@ export function VolumetricViewer({
               <span>
                 3D Volume: {volumeWidth} x {volumeHeight} x {volumeDepth} ({dtype})
               </span>
-              <span style={{ margin: "0 12px", color: "#333" }}>|</span>
-              <span style={{ color: "var(--atlas-blue-dark)" }}>
-                Raymarching Downscale: {downsample}x
+              <span style={{ margin: "0 12px", color: "#7a7569" }}>|</span>
+              <span style={{ color: "#075f83" }}>
+                Preview Downscale: {downsample}x
               </span>
             </>
           )}
         </div>
-        <div style={{ color: "var(--accent)", fontWeight: "bold" }}>
+        <div style={{ color: "#171511", fontWeight: "bold", whiteSpace: "nowrap" }}>
           {viewMode === "2d" ? (
             inspectCoords && inspectVal !== null ? (
               <span>
                 X:{inspectCoords.x} Y:{inspectCoords.y} ➔ Value: {inspectVal}
               </span>
             ) : (
-              <span className="muted" style={{ fontStyle: "italic", fontWeight: "normal", color: "#666" }}>
-                Hover canvas to inspect raw voxels
+              <span className="muted" style={{ fontStyle: "italic", fontWeight: "normal", color: "#5c5a52" }}>
+                {measurementMode
+                  ? "Click two points to measure calibrated distance"
+                  : roiTool !== "off"
+                  ? roiTool === "box"
+                    ? "Click two corners to define a region"
+                    : "Click to place a point ROI"
+                  : "Hover canvas to inspect raw voxels"}
               </span>
             )
           ) : (
-            <span style={{ color: "var(--atlas-orange)" }}>
+            <span style={{ color: "#a6561c" }}>
               Rot: P:{pitch.toFixed(2)} Y:{yaw.toFixed(2)}
             </span>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+type OrthogonalViewerProps = Omit<
+  VolumetricViewerProps,
+  "axis" | "slice" | "viewMode" | "downsample" | "alphaScale" | "pitch" | "yaw" | "onRotationChange" | "title" | "variant" | "crosshair" | "onPlanePointSelect"
+> & {
+  xSlice: number;
+  ySlice: number;
+  zSlice: number;
+  onSliceChange: (next: { x?: number; y?: number; z?: number }) => void;
+  onLoadingChange?: (loading: boolean) => void;
+};
+
+export function OrthogonalViewer({
+  xSlice,
+  ySlice,
+  zSlice,
+  onSliceChange,
+  onLoadedMetadata,
+  onSliceLoaded,
+  onLoadingChange,
+  ...sharedProps
+}: OrthogonalViewerProps) {
+  const crosshair = { x: xSlice, y: ySlice, z: zSlice };
+  const handlePlaneSelect = (point: { x: number; y: number; z: number }) => {
+    onSliceChange(point);
+  };
+  const [planeLoading, setPlaneLoading] = useState({ xy: false, xz: false, yz: false });
+  const orthogonalLoadingChangeRef = useRef(onLoadingChange);
+
+  useEffect(() => {
+    orthogonalLoadingChangeRef.current = onLoadingChange;
+  }, [onLoadingChange]);
+
+  const setPlaneLoadingState = (plane: "xy" | "xz" | "yz", loading: boolean) => {
+    setPlaneLoading((prev) => (prev[plane] === loading ? prev : { ...prev, [plane]: loading }));
+  };
+
+  useEffect(() => {
+    orthogonalLoadingChangeRef.current?.(Object.values(planeLoading).some(Boolean));
+  }, [planeLoading]);
+
+  useEffect(() => {
+    return () => orthogonalLoadingChangeRef.current?.(false);
+  }, []);
+
+  if (sharedProps.zMax <= 1) {
+    return (
+      <div
+        className="orthogonal-viewer"
+        style={{
+          height: "100%",
+          width: "100%",
+          background: "#050505",
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr) 260px",
+          gap: 1,
+          padding: 1,
+        }}
+      >
+        <div style={{ minHeight: 0, minWidth: 0 }}>
+          <VolumetricViewer
+            {...sharedProps}
+            axis="z"
+            slice={zSlice}
+            viewMode="2d"
+            downsample={4}
+            alphaScale={0.15}
+            pitch={0}
+            yaw={0}
+            title={`XY · single plane`}
+            variant="tile"
+            crosshair={crosshair}
+            onPlanePointSelect={handlePlaneSelect}
+            onLoadedMetadata={onLoadedMetadata}
+            onSliceLoaded={onSliceLoaded}
+            onLoadingChange={(loading) => setPlaneLoadingState("xy", loading)}
+          />
+        </div>
+        <div
+          style={{
+            border: "1px solid rgba(251, 248, 239, 0.16)",
+            background: "#080808",
+            color: "#fbf8ef",
+            padding: 16,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+            gap: 10,
+          }}
+        >
+          <div style={{ fontFamily: "var(--font-display)", fontSize: 10, fontWeight: 700, letterSpacing: 0, textTransform: "uppercase", color: "var(--atlas-orange)" }}>
+            Single-Plane Asset
+          </div>
+          <p style={{ margin: 0, fontFamily: "var(--font-body)", fontSize: 13, lineHeight: 1.45, color: "rgba(251, 248, 239, 0.78)" }}>
+            This source has one indexed Z plane, so orthogonal XZ and YZ planes are not available for this asset.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="orthogonal-viewer"
+      style={{
+        height: "100%",
+        width: "100%",
+        background: "#050505",
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1.35fr) minmax(260px, 0.9fr)",
+        gridTemplateRows: "1fr 1fr",
+        gap: 1,
+        padding: 1,
+      }}
+    >
+      <div style={{ gridRow: "1 / span 2", minHeight: 0, minWidth: 0 }}>
+        <VolumetricViewer
+          {...sharedProps}
+          axis="z"
+          slice={zSlice}
+          viewMode="2d"
+          downsample={4}
+          alphaScale={0.15}
+          pitch={0}
+          yaw={0}
+          title={`XY · Z ${zSlice + 1}/${sharedProps.zMax}`}
+          variant="tile"
+            crosshair={crosshair}
+            onPlanePointSelect={handlePlaneSelect}
+            onLoadedMetadata={onLoadedMetadata}
+            onSliceLoaded={onSliceLoaded}
+            onLoadingChange={(loading) => setPlaneLoadingState("xy", loading)}
+          />
+      </div>
+      <div style={{ minHeight: 0, minWidth: 0 }}>
+        <VolumetricViewer
+          {...sharedProps}
+          axis="y"
+          slice={ySlice}
+          viewMode="2d"
+          downsample={4}
+          alphaScale={0.15}
+          pitch={0}
+          yaw={0}
+          title={`XZ · Y ${ySlice + 1}/${sharedProps.yMax}`}
+          variant="tile"
+          crosshair={crosshair}
+          onPlanePointSelect={handlePlaneSelect}
+          onLoadingChange={(loading) => setPlaneLoadingState("xz", loading)}
+        />
+      </div>
+      <div style={{ minHeight: 0, minWidth: 0 }}>
+        <VolumetricViewer
+          {...sharedProps}
+          axis="x"
+          slice={xSlice}
+          viewMode="2d"
+          downsample={4}
+          alphaScale={0.15}
+          pitch={0}
+          yaw={0}
+          title={`YZ · X ${xSlice + 1}/${sharedProps.xMax}`}
+          variant="tile"
+          crosshair={crosshair}
+          onPlanePointSelect={handlePlaneSelect}
+          onLoadingChange={(loading) => setPlaneLoadingState("yz", loading)}
+        />
       </div>
     </div>
   );

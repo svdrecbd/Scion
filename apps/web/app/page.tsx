@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { normalizeSearchParams, type RouteSearchParams } from "../lib/route-props";
@@ -64,25 +65,41 @@ export default async function LandingPage({
 
   return (
     <main>
-      <section className="hero landing-hero" style={{ marginBottom: 36 }}>
-        <div className="kicker">Whole-Cell Imaging Atlas</div>
-        <h1>Find Precedent, Compare Datasets, and Map the Structure of the Field.</h1>
-        <p>
-          The Cell Anatomy Corpus is a structured lookup and comparison layer for whole-cell
-          imaging studies. It is meant to help you find relevant records fast, understand how they
-          were reported, and see where the literature is strong, thin, or hard to compare directly.
-        </p>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
-          <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
-            Open the Corpus
-          </Link>
-          <Link href="/analytics" className="button" style={{ textDecoration: "none" }}>
-            Open Analytics
-          </Link>
-          <Link href="/about" className="button" style={{ textDecoration: "none" }}>
-            About the Corpus
-          </Link>
+      <section className="hero landing-hero landing-hero-visual" style={{ marginBottom: 36 }}>
+        <div className="landing-hero-copy">
+          <div className="kicker">Whole-Cell Imaging Atlas</div>
+          <h1>Find Precedent, Compare Datasets, and Map the Structure of the Field.</h1>
+          <p>
+            The Cell Anatomy Corpus is a structured lookup and comparison layer for whole-cell
+            imaging studies. It is meant to help you find relevant records fast, understand how they
+            were reported, and see where the literature is strong, thin, or hard to compare directly.
+          </p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+            <Link href="/corpus" className="button" style={{ textDecoration: "none" }}>
+              Open the Corpus
+            </Link>
+            <Link href="/analytics" className="button" style={{ textDecoration: "none" }}>
+              Open Analytics
+            </Link>
+            <Link href="/about" className="button" style={{ textDecoration: "none" }}>
+              About the Corpus
+            </Link>
+          </div>
         </div>
+        <figure className="landing-hero-media">
+          <Image
+            src="/brand/cell-anatomy-laundon-choanocyte.jpg"
+            alt="Electron microscopy slice from a choanocyte dataset"
+            width={1800}
+            height={1800}
+            priority
+            sizes="(max-width: 760px) 100vw, 42vw"
+          />
+          <figcaption>
+            Laundon et al. Figshare 7346750, CC BY 4.0. Display crop from a source electron
+            microscopy file.
+          </figcaption>
+        </figure>
       </section>
 
       <section className="panel" style={{ marginTop: 32 }}>

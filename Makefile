@@ -2,7 +2,7 @@ SHELL := /bin/bash
 API_PYTHON ?= $(shell if [ -x apps/api/.venv/bin/python ]; then printf '%s' .venv/bin/python; elif command -v python3 >/dev/null 2>&1; then printf '%s' python3; else printf '%s' python; fi)
 PUBLIC_DATA_ROOT ?= $(HOME)/Downloads/scion-public-data
 
-.PHONY: bootstrap db-migrate db-seed api api-dev web web-dev web-install web-typecheck web-build smoke-web stack-up stack-down stack-status test-api test-ingestion pilot-index pilot-convert pilot-slices check
+.PHONY: bootstrap db-migrate db-seed api api-dev web web-dev web-install web-typecheck web-build desktop-typecheck desktop-build volume-engine-check volume-engine-test smoke-web stack-up stack-down stack-status test-api test-ingestion pilot-index pilot-convert pilot-slices check
 
 bootstrap:
 	bash scripts/bootstrap.sh
@@ -34,6 +34,18 @@ web-typecheck:
 web-build:
 	cd apps/web && npm run build
 
+desktop-typecheck:
+	cd apps/desktop && npm run typecheck
+
+desktop-build:
+	cd apps/desktop && npm run build
+
+volume-engine-check:
+	cargo check --manifest-path workers/volume-engine/Cargo.toml
+
+volume-engine-test:
+	cargo test --manifest-path workers/volume-engine/Cargo.toml
+
 smoke-web:
 	cd apps/api && $(API_PYTHON) ../../scripts/smoke_stack.py
 
@@ -61,4 +73,4 @@ pilot-convert:
 pilot-slices:
 	python3 workers/ingestion/public_data_pilot.py slices "$(PILOT_SLUG)" --root "$(PUBLIC_DATA_ROOT)" $(if $(PILOT_ASSET),--asset "$(PILOT_ASSET)",) $(if $(PILOT_ALL_READY),--all-ready,) $(if $(PILOT_MAX_SLICES),--max-slices "$(PILOT_MAX_SLICES)",) $(if $(PILOT_ALL_SLICES),--all-slices,) $(if $(PILOT_MAX_WIDTH),--max-width "$(PILOT_MAX_WIDTH)",) $(if $(PILOT_MAX_HEIGHT),--max-height "$(PILOT_MAX_HEIGHT)",)
 
-check: test-api test-ingestion web-typecheck web-build smoke-web
+check: test-api test-ingestion web-typecheck web-build desktop-typecheck desktop-build volume-engine-check volume-engine-test smoke-web

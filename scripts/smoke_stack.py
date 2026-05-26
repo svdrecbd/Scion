@@ -182,6 +182,7 @@ def main() -> None:
                 urls = [
                     f"http://127.0.0.1:{web_port}/",
                     f"http://127.0.0.1:{web_port}/guide",
+                    f"http://127.0.0.1:{web_port}/account",
                     f"http://127.0.0.1:{web_port}/analytics",
                     f"http://127.0.0.1:{web_port}/plan",
                     f"http://127.0.0.1:{web_port}/datasets/{dataset_ids[0]}",

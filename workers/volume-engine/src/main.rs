@@ -1,23 +1,29 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::File;
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::env;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
 use tower_http::cors::{Any, CorsLayer};
 use rusqlite::Connection;
 
 static CUSTOM_DATASETS: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
 fn get_custom_datasets() -> &'static Mutex<Vec<serde_json::Value>> {
-    CUSTOM_DATASETS.get_or_init(|| Mutex::new(Vec::new()))
+    CUSTOM_DATASETS.get_or_init(|| Mutex::new(load_custom_dataset_registry()))
 }
 
 
@@ -29,6 +35,32 @@ const PUBLIC_DATA_ASSETS_CSV: &str = include_str!("../../../references/manifests
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
+    index_jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct IndexJobRecord {
+    id: String,
+    kind: String,
+    dataset_slug: String,
+    asset_relative_path: String,
+    status: String,
+    created_at_ms: u64,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
+    exit_code: Option<i32>,
+    pid: Option<u32>,
+    command: Vec<String>,
+    command_display: String,
+    log: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct StartIndexJobRequest {
+    kind: String,
+    dataset_slug: String,
+    asset_relative_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -105,6 +137,11 @@ struct Zarray {
     shape: Vec<usize>,
     chunks: Vec<usize>,
     dtype: String,
+    compressor: Option<Value>,
+    filters: Option<Value>,
+    order: Option<String>,
+    zarr_format: Option<u8>,
+    dimension_separator: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -120,6 +157,731 @@ struct DerivativeEntry {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct DerivativeManifest {
     derivatives: Vec<DerivativeEntry>,
+}
+
+fn get_workbench_state_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("CELL_ANATOMY_WORKBENCH_STATE_DIR") {
+        return PathBuf::from(root);
+    }
+    if let Ok(root) = std::env::var("SCION_WORKBENCH_STATE_DIR") {
+        return PathBuf::from(root);
+    }
+    if let Some(home) = home::home_dir() {
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("Cell Anatomy Workbench");
+    }
+    PathBuf::from(".cell-anatomy-workbench")
+}
+
+fn get_custom_dataset_registry_path() -> PathBuf {
+    get_workbench_state_dir().join("local-datasets.json")
+}
+
+fn dataset_output_path_exists(dataset: &Value) -> bool {
+    dataset
+        .get("derivatives")
+        .and_then(|d| d.as_array())
+        .and_then(|derivatives| derivatives.first())
+        .and_then(|derivative| derivative.get("output_path"))
+        .and_then(|path| path.as_str())
+        .map(|path| PathBuf::from(path).exists())
+        .unwrap_or(false)
+}
+
+fn load_custom_dataset_registry() -> Vec<Value> {
+    let registry_path = get_custom_dataset_registry_path();
+    let file = match File::open(&registry_path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+
+    let parsed = match serde_json::from_reader::<_, Vec<Value>>(file) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("Failed to parse local dataset registry {:?}: {}", registry_path, err);
+            return Vec::new();
+        }
+    };
+
+    parsed
+        .into_iter()
+        .filter(dataset_output_path_exists)
+        .collect()
+}
+
+fn persist_custom_dataset_registry(datasets: &[Value]) -> Result<(), String> {
+    let registry_path = get_custom_dataset_registry_path();
+    let parent = registry_path
+        .parent()
+        .ok_or_else(|| "Local dataset registry path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("Failed to create registry directory {:?}: {}", parent, err))?;
+
+    let mut file = File::create(&registry_path)
+        .map_err(|err| format!("Failed to create registry {:?}: {}", registry_path, err))?;
+    let payload = serde_json::to_string_pretty(datasets)
+        .map_err(|err| format!("Failed to serialize local dataset registry: {}", err))?;
+    file.write_all(payload.as_bytes())
+        .map_err(|err| format!("Failed to write registry {:?}: {}", registry_path, err))
+}
+
+fn read_json_value(path: &Path) -> Option<Value> {
+    let file = File::open(path).ok()?;
+    serde_json::from_reader::<_, Value>(file).ok()
+}
+
+fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(|item| item.as_str()).unwrap_or("")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn relative_pilot_asset_path(dataset_dir: &Path, asset: &Value) -> String {
+    let mirrored = asset.get("mirrored_asset").unwrap_or(&Value::Null);
+    let source = asset.get("source_asset").unwrap_or(&Value::Null);
+    let local_path = value_str(mirrored, "local_path");
+    if !local_path.is_empty() {
+        let local = PathBuf::from(local_path);
+        if let Ok(relative) = local.strip_prefix(dataset_dir.join("data")) {
+            return relative.to_string_lossy().into_owned();
+        }
+    }
+    value_str(source, "repository_path").to_string()
+}
+
+fn find_manifest_asset<'a>(manifest: &'a Value, key: &str, relative_path: &str) -> Option<&'a Value> {
+    manifest
+        .get(key)
+        .and_then(|items| items.as_array())
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("relative_path").and_then(|value| value.as_str()) == Some(relative_path)
+            })
+        })
+}
+
+fn find_derivative<'a>(derivatives: &'a [Value], relative_path: &str) -> Option<&'a Value> {
+    derivatives.iter().find(|item| {
+        item.get("source_relative_path").and_then(|value| value.as_str()) == Some(relative_path)
+    })
+}
+
+fn pilot_index_queue_payload() -> Value {
+    let root = get_public_data_root();
+    let mut datasets = Vec::new();
+    let mut totals = serde_json::json!({
+        "datasets": 0,
+        "assets": 0,
+        "indexed": 0,
+        "ready_for_conversion": 0,
+        "ready_for_slice_cache": 0,
+        "slice_cache_indexed": 0,
+        "blocked": 0,
+        "sidecars": 0
+    });
+
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return serde_json::json!({
+                "root": root.to_string_lossy(),
+                "root_exists": root.exists(),
+                "summary": totals,
+                "datasets": []
+            });
+        }
+    };
+
+    for entry in entries.flatten() {
+        let dataset_dir = entry.path();
+        if !dataset_dir.is_dir() {
+            continue;
+        }
+        let metadata_dir = dataset_dir.join("metadata");
+        let state_path = metadata_dir.join("asset-state-manifest.json");
+        if !state_path.exists() {
+            continue;
+        }
+
+        let state = match read_json_value(&state_path) {
+            Some(value) => value,
+            None => continue,
+        };
+        let readiness = read_json_value(&metadata_dir.join("conversion-readiness-manifest.json"))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let derivative_manifest = read_json_value(&metadata_dir.join("derivative-manifest.json"))
+            .unwrap_or_else(|| serde_json::json!({ "derivatives": [] }));
+        let derivatives = derivative_manifest
+            .get("derivatives")
+            .and_then(|items| items.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let dataset = state.get("dataset").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let slug = dataset_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let mut assets_out = Vec::new();
+        let assets = state
+            .get("assets")
+            .and_then(|items| items.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for asset in assets {
+            let mirrored = asset.get("mirrored_asset").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let volume = asset.get("validated_volume").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let streamable = asset.get("streamable_derivative").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let slice_cache = asset.get("browser_slice_cache").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let relative_path = relative_pilot_asset_path(&dataset_dir, &asset);
+            let derivative = find_derivative(&derivatives, &relative_path).cloned();
+            let ready_conversion = find_manifest_asset(&readiness, "ready_assets", &relative_path).cloned();
+            let slice_supported = ready_conversion
+                .as_ref()
+                .and_then(|ready| ready.get("format").and_then(|format| format.as_str()))
+                .map(|format| matches!(format, "TIFF" | "MRC" | "TIFF_SERIES"))
+                .unwrap_or(false);
+            let slice_cached = value_str(&slice_cache, "state") == "ready";
+            let format = value_str(&mirrored, "format").to_string();
+            let volume_state = value_str(&volume, "state").to_string();
+            let indexed = derivative.is_some();
+            let converter_supported = ready_conversion
+                .as_ref()
+                .and_then(|ready| ready.get("format").and_then(|format| format.as_str()))
+                == Some("TIFF");
+            let status = if indexed {
+                "indexed"
+            } else if converter_supported {
+                "ready_for_conversion"
+            } else if slice_cached {
+                "slice_cache_indexed"
+            } else if slice_supported {
+                "slice_cache_ready"
+            } else if volume_state == "not_applicable" {
+                "sidecar"
+            } else {
+                "needs_review"
+            };
+
+            if let Some(value) = totals.get_mut("assets").and_then(|value| value.as_i64()) {
+                totals["assets"] = serde_json::json!(value + 1);
+            }
+            let counter = match status {
+                "indexed" => "indexed",
+                "ready_for_conversion" => "ready_for_conversion",
+                "slice_cache_ready" => "ready_for_slice_cache",
+                "slice_cache_indexed" => "slice_cache_indexed",
+                "sidecar" => "sidecars",
+                _ => "blocked",
+            };
+            let current = totals.get(counter).and_then(|value| value.as_i64()).unwrap_or(0);
+            totals[counter] = serde_json::json!(current + 1);
+
+            let convert_command = if converter_supported && !indexed {
+                Some(format!(
+                    "python3 workers/ingestion/public_data_pilot.py convert {} --root {} --asset {}",
+                    shell_quote(&slug),
+                    shell_quote(&root.to_string_lossy()),
+                    shell_quote(&relative_path)
+                ))
+            } else {
+                None
+            };
+            let slice_command = if slice_supported && !slice_cached && !indexed {
+                Some(format!(
+                    "python3 workers/ingestion/public_data_pilot.py slices {} --root {} --asset {}",
+                    shell_quote(&slug),
+                    shell_quote(&root.to_string_lossy()),
+                    shell_quote(&relative_path)
+                ))
+            } else {
+                None
+            };
+
+            assets_out.push(serde_json::json!({
+                "relative_path": relative_path,
+                "format": format,
+                "size_bytes": mirrored.get("size_bytes").cloned().unwrap_or(Value::Null),
+                "validated_state": volume_state,
+                "streamable_state": if indexed { "indexed" } else { value_str(&streamable, "state") },
+                "slice_cache_state": value_str(&slice_cache, "state"),
+                "index_status": status,
+                "dimensions": volume.get("dimensions").cloned().unwrap_or(Value::Null),
+                "physical_voxel_size_nm": volume.get("physical_voxel_size_nm").cloned().unwrap_or(Value::Null),
+                "warnings": volume.get("warnings").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "blockers": volume.get("blockers").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "review_notes": volume.get("review_notes").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "derivative": derivative,
+                "convert_command": convert_command,
+                "slice_command": slice_command
+            }));
+        }
+
+        let dataset_total = totals.get("datasets").and_then(|value| value.as_i64()).unwrap_or(0);
+        totals["datasets"] = serde_json::json!(dataset_total + 1);
+        datasets.push(serde_json::json!({
+            "slug": slug,
+            "dataset": dataset,
+            "readiness": readiness.get("summary").cloned().unwrap_or(Value::Null),
+            "derivative_count": derivatives.len(),
+            "assets": assets_out
+        }));
+    }
+
+    serde_json::json!({
+        "root": root.to_string_lossy(),
+        "root_exists": root.exists(),
+        "summary": totals,
+        "datasets": datasets
+    })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn json_response(status: StatusCode, payload: Value) -> axum::response::Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&payload).unwrap(),
+    ).into_response()
+}
+
+fn get_repo_root() -> PathBuf {
+    for key in ["CELL_ANATOMY_REPO_ROOT", "SCION_REPO_ROOT"] {
+        if let Ok(value) = env::var(key) {
+            let path = PathBuf::from(value);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if cwd.join("workers/ingestion/public_data_pilot.py").exists() {
+        return cwd;
+    }
+    for ancestor in cwd.ancestors() {
+        if ancestor.join("workers/ingestion/public_data_pilot.py").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+    cwd
+}
+
+fn normalize_index_job_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "convert" => Some("convert"),
+        "slice" | "slices" | "slice-cache" | "slice_cache" => Some("slices"),
+        _ => None,
+    }
+}
+
+fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, Vec<String>, String, PathBuf), String> {
+    let kind = normalize_index_job_kind(&request.kind)
+        .ok_or_else(|| "Unsupported index job kind. Use convert or slices.".to_string())?;
+    let queue = pilot_index_queue_payload();
+    if !queue.get("root_exists").and_then(|value| value.as_bool()).unwrap_or(false) {
+        return Err(format!(
+            "Public data root not found: {}",
+            queue.get("root").and_then(|value| value.as_str()).unwrap_or("")
+        ));
+    }
+
+    let datasets = queue
+        .get("datasets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Index queue payload did not include datasets.".to_string())?;
+    let dataset = datasets
+        .iter()
+        .find(|dataset| value_str(dataset, "slug") == request.dataset_slug)
+        .ok_or_else(|| format!("Dataset not found in index queue: {}", request.dataset_slug))?;
+    let assets = dataset
+        .get("assets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Dataset has no asset list in the index queue.".to_string())?;
+    let asset = assets
+        .iter()
+        .find(|asset| value_str(asset, "relative_path") == request.asset_relative_path)
+        .ok_or_else(|| format!("Asset not found in index queue: {}", request.asset_relative_path))?;
+
+    let command_key = if kind == "convert" { "convert_command" } else { "slice_command" };
+    let command_available = asset
+        .get(command_key)
+        .and_then(|value| value.as_str())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if !command_available {
+        return Err(format!(
+            "{} is not currently available for {} ({})",
+            if kind == "convert" { "Conversion" } else { "Slice-cache generation" },
+            request.asset_relative_path,
+            value_str(asset, "index_status")
+        ));
+    }
+
+    let repo_root = get_repo_root();
+    let script_path = repo_root.join("workers/ingestion/public_data_pilot.py");
+    if !script_path.exists() {
+        return Err(format!(
+            "Pilot ingestion script not found at {}. Set CELL_ANATOMY_REPO_ROOT to the repository root.",
+            script_path.to_string_lossy()
+        ));
+    }
+
+    let root = queue.get("root").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let command = vec![
+        "python3".to_string(),
+        script_path.to_string_lossy().to_string(),
+        kind.to_string(),
+        request.dataset_slug.clone(),
+        "--root".to_string(),
+        root.clone(),
+        "--asset".to_string(),
+        request.asset_relative_path.clone(),
+    ];
+    let command_display = format!(
+        "python3 workers/ingestion/public_data_pilot.py {} {} --root {} --asset {}",
+        kind,
+        shell_quote(&request.dataset_slug),
+        shell_quote(&root),
+        shell_quote(&request.asset_relative_path)
+    );
+
+    Ok((kind.to_string(), command, command_display, repo_root))
+}
+
+fn append_index_job_log(jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: &str, line: String) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = jobs.lock() {
+        if let Some(job) = guard.get_mut(job_id) {
+            job.log.push(line);
+            if job.log.len() > 300 {
+                let drop_count = job.log.len() - 300;
+                job.log.drain(0..drop_count);
+            }
+        }
+    }
+}
+
+fn update_index_job<F>(jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: &str, mut updater: F)
+where
+    F: FnMut(&mut IndexJobRecord),
+{
+    if let Ok(mut guard) = jobs.lock() {
+        if let Some(job) = guard.get_mut(job_id) {
+            updater(job);
+        }
+    }
+}
+
+fn start_index_job(state: &AppState, request: StartIndexJobRequest) -> Result<IndexJobRecord, String> {
+    let (kind, command, command_display, repo_root) = resolve_index_job_command(&request)?;
+    let id = format!("index_job_{}", now_ms());
+    let record = IndexJobRecord {
+        id: id.clone(),
+        kind,
+        dataset_slug: request.dataset_slug,
+        asset_relative_path: request.asset_relative_path,
+        status: "queued".to_string(),
+        created_at_ms: now_ms(),
+        started_at_ms: None,
+        finished_at_ms: None,
+        exit_code: None,
+        pid: None,
+        command: command.clone(),
+        command_display,
+        log: vec!["Queued local index job.".to_string()],
+        error: None,
+    };
+
+    {
+        let mut guard = state.index_jobs.lock().map_err(|_| "Index job registry is unavailable.".to_string())?;
+        guard.insert(id.clone(), record.clone());
+    }
+
+    let jobs = state.index_jobs.clone();
+    tokio::spawn(async move {
+        run_index_job(jobs, id, command, repo_root).await;
+    });
+
+    Ok(record)
+}
+
+async fn read_process_lines<R>(jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: String, source: &'static str, stream: R)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stream).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        append_index_job_log(&jobs, &job_id, format!("{}: {}", source, line));
+    }
+}
+
+async fn run_index_job(
+    jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    job_id: String,
+    command: Vec<String>,
+    repo_root: PathBuf,
+) {
+    let should_cancel = {
+        let guard = jobs.lock();
+        guard
+            .ok()
+            .and_then(|guard| guard.get(&job_id).map(|job| job.status == "cancel_requested"))
+            .unwrap_or(false)
+    };
+    if should_cancel {
+        update_index_job(&jobs, &job_id, |job| {
+            job.status = "cancelled".to_string();
+            job.finished_at_ms = Some(now_ms());
+            job.log.push("Cancelled before process start.".to_string());
+        });
+        return;
+    }
+
+    update_index_job(&jobs, &job_id, |job| {
+        job.status = "running".to_string();
+        job.started_at_ms = Some(now_ms());
+        job.log.push(format!("Starting: {}", job.command_display));
+    });
+
+    let mut process = TokioCommand::new(&command[0]);
+    process
+        .args(&command[1..])
+        .current_dir(repo_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            update_index_job(&jobs, &job_id, |job| {
+                job.status = "failed".to_string();
+                job.finished_at_ms = Some(now_ms());
+                job.error = Some(error.to_string());
+                job.log.push(format!("Failed to start process: {}", error));
+            });
+            return;
+        }
+    };
+
+    update_index_job(&jobs, &job_id, |job| {
+        job.pid = child.id();
+        if let Some(pid) = child.id() {
+            job.log.push(format!("Process started with pid {}.", pid));
+        }
+    });
+
+    let stdout_task = child.stdout.take().map(|stdout| {
+        tokio::spawn(read_process_lines(
+            jobs.clone(),
+            job_id.clone(),
+            "stdout",
+            stdout,
+        ))
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(read_process_lines(
+            jobs.clone(),
+            job_id.clone(),
+            "stderr",
+            stderr,
+        ))
+    });
+
+    let wait_result = child.wait().await;
+    if let Some(task) = stdout_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+
+    update_index_job(&jobs, &job_id, |job| {
+        let was_cancel_requested = job.status == "cancel_requested";
+        job.finished_at_ms = Some(now_ms());
+        job.pid = None;
+        match &wait_result {
+            Ok(status) => {
+                job.exit_code = status.code();
+                if was_cancel_requested {
+                    job.status = "cancelled".to_string();
+                    job.log.push("Process cancelled.".to_string());
+                } else if status.success() {
+                    job.status = "completed".to_string();
+                    job.log.push("Process completed successfully.".to_string());
+                } else {
+                    job.status = "failed".to_string();
+                    job.error = Some(format!("Process exited with status {}", status));
+                    job.log.push(format!("Process exited with status {}.", status));
+                }
+            }
+            Err(error) => {
+                job.status = if was_cancel_requested { "cancelled".to_string() } else { "failed".to_string() };
+                job.error = Some(error.to_string());
+                job.log.push(format!("Process wait failed: {}", error));
+            }
+        }
+    });
+}
+
+fn stable_path_hash(path: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn slugify_path_component(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "local_zarr".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn zarr_dtype_elem_size(dtype: &str) -> Option<usize> {
+    match dtype {
+        "|u1" | "uint8" => Some(1),
+        "<u2" | "uint16" => Some(2),
+        _ => None,
+    }
+}
+
+fn resolve_local_zarr_array(path: &Path) -> Option<(PathBuf, String, PathBuf)> {
+    let direct_zarray = path.join(".zarray");
+    if direct_zarray.exists() {
+        return Some((path.to_path_buf(), ".".to_string(), direct_zarray));
+    }
+
+    let multiscale_zarray = path.join("0").join(".zarray");
+    if multiscale_zarray.exists() {
+        return Some((path.to_path_buf(), "0".to_string(), multiscale_zarray));
+    }
+
+    None
+}
+
+fn read_zarray_file(zarray_path: &Path) -> Result<Zarray, String> {
+    let file = File::open(zarray_path)
+        .map_err(|err| format!("Failed to open .zarray {:?}: {}", zarray_path, err))?;
+    serde_json::from_reader(file)
+        .map_err(|err| format!("Failed to parse .zarray {:?}: {}", zarray_path, err))
+}
+
+fn zarray_has_no_filters(filters: &Option<Value>) -> bool {
+    match filters {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(values)) => values.is_empty(),
+        _ => false,
+    }
+}
+
+fn local_zarr_compatibility_report(
+    path: &Path,
+    array_path: Option<&str>,
+    zarray: Option<&Zarray>,
+    voxel_size_found: bool,
+) -> Value {
+    let mut checks = BTreeMap::new();
+    checks.insert("path_exists".to_string(), path.exists());
+    checks.insert("zarray_found".to_string(), zarray.is_some());
+
+    if let Some(config) = zarray {
+        checks.insert("shape_is_3d".to_string(), config.shape.len() == 3);
+        checks.insert("chunks_are_3d".to_string(), config.chunks.len() == 3);
+        checks.insert("dtype_supported".to_string(), zarr_dtype_elem_size(&config.dtype).is_some());
+        checks.insert(
+            "uncompressed_chunks".to_string(),
+            config.compressor.as_ref().map_or(true, |compressor| compressor.is_null()),
+        );
+        checks.insert("filters_supported".to_string(), zarray_has_no_filters(&config.filters));
+        checks.insert(
+            "row_major_order".to_string(),
+            config.order.as_deref().map_or(true, |order| order.eq_ignore_ascii_case("C")),
+        );
+        checks.insert(
+            "dot_chunk_keys".to_string(),
+            config.dimension_separator.as_deref().map_or(true, |separator| separator == "."),
+        );
+        checks.insert(
+            "zarr_v2".to_string(),
+            config.zarr_format.map_or(true, |format| format == 2),
+        );
+    } else {
+        checks.insert("shape_is_3d".to_string(), false);
+        checks.insert("chunks_are_3d".to_string(), false);
+        checks.insert("dtype_supported".to_string(), false);
+        checks.insert("uncompressed_chunks".to_string(), false);
+        checks.insert("filters_supported".to_string(), false);
+        checks.insert("row_major_order".to_string(), false);
+        checks.insert("dot_chunk_keys".to_string(), false);
+        checks.insert("zarr_v2".to_string(), false);
+    }
+
+    checks.insert("voxel_metadata_found".to_string(), voxel_size_found);
+
+    let required = [
+        "path_exists",
+        "zarray_found",
+        "shape_is_3d",
+        "chunks_are_3d",
+        "dtype_supported",
+        "uncompressed_chunks",
+        "filters_supported",
+        "row_major_order",
+        "dot_chunk_keys",
+        "zarr_v2",
+    ];
+    let required_ok = required
+        .iter()
+        .all(|key| checks.get(*key).copied().unwrap_or(false));
+    let status = if required_ok {
+        if voxel_size_found {
+            "ready"
+        } else {
+            "warning"
+        }
+    } else {
+        "unsupported"
+    };
+
+    let summary = match status {
+        "ready" => "Local Zarr is compatible with the current raw chunk reader.",
+        "warning" => "Local Zarr is compatible, but voxel-size metadata was not found; measurements default to 1 nm voxels.",
+        _ => "Local Zarr is not compatible with the current raw 3D Zarr reader.",
+    };
+
+    serde_json::json!({
+        "status": status,
+        "summary": summary,
+        "array_path": array_path.unwrap_or(""),
+        "checks": checks
+    })
 }
 
 fn get_public_data_root() -> PathBuf {
@@ -636,7 +1398,7 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
     (StatusCode::OK, headers, out_buffer).into_response()
 }
 
-fn parse_voxel_size(path: &Path) -> Value {
+fn parse_voxel_size_with_status(path: &Path) -> (Value, bool) {
     let mut zattrs_path = path.join(".zattrs");
     if !zattrs_path.exists() && path.ends_with("0") {
         if let Some(parent) = path.parent() {
@@ -655,11 +1417,14 @@ fn parse_voxel_size(path: &Path) -> Value {
                                         if t.get("type").and_then(|ty| ty.as_str()) == Some("scale") {
                                             if let Some(scale) = t.get("scale").and_then(|s| s.as_array()) {
                                                 if scale.len() == 3 {
-                                                    return serde_json::json!({
-                                                        "z": scale[0],
-                                                        "y": scale[1],
-                                                        "x": scale[2]
-                                                    });
+                                                    return (
+                                                        serde_json::json!({
+                                                            "z": scale[0],
+                                                            "y": scale[1],
+                                                            "x": scale[2]
+                                                        }),
+                                                        true,
+                                                    );
                                                 }
                                             }
                                         }
@@ -672,11 +1437,14 @@ fn parse_voxel_size(path: &Path) -> Value {
             }
         }
     }
-    serde_json::json!({
-        "z": 1.0,
-        "y": 1.0,
-        "x": 1.0
-    })
+    (
+        serde_json::json!({
+            "z": 1.0,
+            "y": 1.0,
+            "x": 1.0
+        }),
+        false,
+    )
 }
 
 #[derive(Deserialize)]
@@ -685,83 +1453,113 @@ struct OpenLocalParams {
 }
 
 async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoResponse {
-    let path = PathBuf::from(&params.path);
+    let requested_path = PathBuf::from(&params.path);
+    let path = fs::canonicalize(&requested_path).unwrap_or_else(|_| requested_path.clone());
     if !path.exists() {
+        let compatibility = local_zarr_compatibility_report(&path, None, None, false);
         return (
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "application/json")],
             serde_json::to_string(&serde_json::json!({
                 "success": false,
-                "error": format!("Path does not exist: {}", params.path)
+                "error": format!("Path does not exist: {}", params.path),
+                "compatibility": compatibility
             })).unwrap()
         ).into_response();
     }
 
-    let mut zarray_path = path.join(".zarray");
-    if !zarray_path.exists() {
-        zarray_path = path.join("0").join(".zarray");
-        if !zarray_path.exists() {
+    let (zarr_root, array_path, zarray_path) = match resolve_local_zarr_array(&path) {
+        Some(resolved) => resolved,
+        None => {
+            let compatibility = local_zarr_compatibility_report(&path, None, None, false);
             return (
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 serde_json::to_string(&serde_json::json!({
                     "success": false,
-                    "error": "No .zarray file found at the root or within resolution group '0'"
+                    "error": "No .zarray file found at the root or within resolution group '0'",
+                    "compatibility": compatibility
                 })).unwrap()
             ).into_response();
         }
+    };
+
+    let zarr_config = match read_zarray_file(&zarray_path) {
+        Ok(config) => config,
+        Err(e) => {
+            let compatibility = local_zarr_compatibility_report(&path, Some(&array_path), None, false);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_string(&serde_json::json!({
+                    "success": false,
+                    "error": e,
+                    "compatibility": compatibility
+                })).unwrap()
+            ).into_response();
+        }
+    };
+
+    let (voxel_size, voxel_size_found) = parse_voxel_size_with_status(&zarr_root);
+    let compatibility = local_zarr_compatibility_report(
+        &zarr_root,
+        Some(&array_path),
+        Some(&zarr_config),
+        voxel_size_found,
+    );
+
+    if compatibility.get("status").and_then(|status| status.as_str()) == Some("unsupported") {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::to_string(&serde_json::json!({
+                "success": false,
+                "error": compatibility
+                    .get("summary")
+                    .and_then(|summary| summary.as_str())
+                    .unwrap_or("Local Zarr is not compatible with the current reader."),
+                "compatibility": compatibility
+            })).unwrap()
+        ).into_response();
     }
 
-    let file = match File::open(&zarray_path) {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                serde_json::to_string(&serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to open .zarray: {}", e)
-                })).unwrap()
-            ).into_response();
-        }
-    };
-
-    let zarr_config: Zarray = match serde_json::from_reader(file) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                serde_json::to_string(&serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to parse .zarray: {}", e)
-                })).unwrap()
-            ).into_response();
-        }
-    };
-
-    let folder_name = path.file_name()
+    let folder_name = zarr_root.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unnamed")
         .to_string();
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let slug = format!("custom_{}_{}", folder_name.to_lowercase().replace(' ', "_"), timestamp);
+    let output_path = zarr_root.to_string_lossy().into_owned();
+    let slug = format!(
+        "custom_{}_{:016x}",
+        slugify_path_component(&folder_name),
+        stable_path_hash(&output_path)
+    );
     let title = format!("Local: {}", folder_name);
 
-    let voxel_size = parse_voxel_size(&path);
+    let elem_size = zarr_dtype_elem_size(&zarr_config.dtype).unwrap_or(0);
+    let byte_size = zarr_config
+        .shape
+        .iter()
+        .try_fold(1usize, |acc, value| acc.checked_mul(*value))
+        .and_then(|voxels| voxels.checked_mul(elem_size))
+        .unwrap_or(0);
 
     let derivative = serde_json::json!({
-        "source_relative_path": "",
-        "output_path": params.path.clone(),
+        "source_relative_path": array_path,
+        "source_local_path": output_path,
+        "source_sha256": "",
+        "source_size_bytes": byte_size,
+        "output_path": output_path,
+        "format": "zarr",
+        "ome_ngff_version": "detected",
+        "zarr_format": zarr_config.zarr_format.unwrap_or(2),
+        "array_path": compatibility.get("array_path").cloned().unwrap_or(Value::String("".to_string())),
         "shape_zyx": zarr_config.shape,
         "chunks_zyx": zarr_config.chunks,
         "dtype": zarr_config.dtype,
-        "physical_voxel_size_nm": voxel_size
+        "byte_size": byte_size,
+        "physical_voxel_size_nm": voxel_size,
+        "validation": compatibility
     });
 
     let new_dataset = serde_json::json!({
@@ -774,19 +1572,153 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
         "findings": []
     });
 
-    {
+    let (persisted, persistence_error) = {
         let mut guard = get_custom_datasets().lock().unwrap();
+        guard.retain(|dataset| {
+            let existing_slug = dataset.get("slug").and_then(|value| value.as_str());
+            let existing_path = dataset
+                .get("derivatives")
+                .and_then(|derivatives| derivatives.as_array())
+                .and_then(|derivatives| derivatives.first())
+                .and_then(|derivative| derivative.get("output_path"))
+                .and_then(|value| value.as_str());
+            existing_slug != Some(slug.as_str()) && existing_path != Some(output_path.as_str())
+        });
         guard.push(new_dataset);
-    }
+        match persist_custom_dataset_registry(&guard) {
+            Ok(()) => (true, None),
+            Err(err) => {
+                eprintln!("Failed to persist local dataset registry: {}", err);
+                (false, Some(err))
+            }
+        }
+    };
 
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&serde_json::json!({
             "success": true,
-            "slug": slug
+            "slug": slug,
+            "persisted": persisted,
+            "registry_path": get_custom_dataset_registry_path().to_string_lossy(),
+            "persistence_error": persistence_error
         })).unwrap()
     ).into_response()
+}
+
+async fn handle_index_queue() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&pilot_index_queue_payload()).unwrap(),
+    ).into_response()
+}
+
+async fn handle_list_index_jobs(State(state): State<AppState>) -> impl IntoResponse {
+    let mut jobs = state
+        .index_jobs
+        .lock()
+        .map(|guard| guard.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    jobs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    json_response(StatusCode::OK, serde_json::json!({ "jobs": jobs }))
+}
+
+async fn handle_start_index_job(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<StartIndexJobRequest>,
+) -> impl IntoResponse {
+    match start_index_job(&state, payload) {
+        Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
+        Err(error) => json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": error })),
+    }
+}
+
+async fn handle_cancel_index_job(
+    AxumPath(job_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let pid = {
+        let mut guard = match state.index_jobs.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "Index job registry is unavailable." }),
+                )
+            }
+        };
+        let job = match guard.get_mut(&job_id) {
+            Some(job) => job,
+            None => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "Index job not found." }),
+                )
+            }
+        };
+        match job.status.as_str() {
+            "queued" | "running" => {
+                job.status = "cancel_requested".to_string();
+                job.log.push("Cancellation requested.".to_string());
+                job.pid
+            }
+            "cancel_requested" => job.pid,
+            _ => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({ "error": format!("Cannot cancel a {} job.", job.status) }),
+                )
+            }
+        }
+    };
+
+    if let Some(pid) = pid {
+        let _ = StdCommand::new("kill").arg(pid.to_string()).status();
+    }
+    let job = state
+        .index_jobs
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&job_id).cloned());
+    json_response(StatusCode::OK, serde_json::json!({ "job": job }))
+}
+
+async fn handle_retry_index_job(
+    AxumPath(job_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let request = {
+        let guard = match state.index_jobs.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "Index job registry is unavailable." }),
+                )
+            }
+        };
+        let job = match guard.get(&job_id) {
+            Some(job) => job,
+            None => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "Index job not found." }),
+                )
+            }
+        };
+        StartIndexJobRequest {
+            kind: job.kind.clone(),
+            dataset_slug: job.dataset_slug.clone(),
+            asset_relative_path: job.asset_relative_path.clone(),
+        }
+    };
+
+    match start_index_job(&state, request) {
+        Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
+        Err(error) => json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": error })),
+    }
 }
 
 async fn handle_workbench_data() -> impl IntoResponse {
@@ -2759,6 +3691,7 @@ async fn main() {
     
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
+        index_jobs: Arc::new(Mutex::new(BTreeMap::new())),
     };
 
     let app = Router::new()
@@ -2767,6 +3700,10 @@ async fn main() {
         .route("/api/volume/3d", get(handle_volume_3d))
         .route("/api/volume/workbench-data", get(handle_workbench_data))
         .route("/api/volume/open-local", get(handle_open_local))
+        .route("/api/volume/index-queue", get(handle_index_queue))
+        .route("/api/volume/index-jobs", get(handle_list_index_jobs).post(handle_start_index_job))
+        .route("/api/volume/index-jobs/:job_id/cancel", post(handle_cancel_index_job))
+        .route("/api/volume/index-jobs/:job_id/retry", post(handle_retry_index_job))
         .route("/api/datasets", get(handle_search))
         .route("/api/datasets/export", get(handle_export))
         .route("/api/datasets/facets", get(handle_facets))
