@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useState, type DragEvent } from "react";
 import { WorkbenchLogo } from "./brand";
-import { WorkbenchClient, PackagedDataset } from "./workbench-client";
+import { WorkbenchClient, type PackagedDataset } from "./workbench-client";
 
 function CockpitHeader({
   status,
@@ -31,10 +31,19 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 8000): Promise<T
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
+    const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(`Data runtime responded with status: ${response.status}`);
+      throw new Error(payload?.error || payload?.detail || `Data runtime responded with status: ${response.status}`);
     }
-    return await response.json();
+    return payload as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Volume engine request timed out.");
+    }
+    if (error instanceof TypeError) {
+      throw new Error("Volume engine is not reachable at 127.0.0.1:8080.");
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -47,6 +56,7 @@ export default function App() {
   const [isTauri, setIsTauri] = useState(false);
   const [openingLocal, setOpeningLocal] = useState(false);
   const [localImportStatus, setLocalImportStatus] = useState<string | null>(null);
+  const [loadSerial, setLoadSerial] = useState(0);
 
   useEffect(() => {
     if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
@@ -95,11 +105,11 @@ export default function App() {
 
         window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
       } else {
-        alert(`Failed to open local directory: ${result.error || "Unknown error"}`);
+        setLocalImportStatus(result.error || "Local data open failed.");
       }
     } catch (error) {
       console.error("Error opening directory picker:", error);
-      alert("Directory selection failed. Please ensure the Cell Anatomy volume engine sidecar is running.");
+      setLocalImportStatus(error instanceof Error ? error.message : "Directory selection failed.");
     } finally {
       setOpeningLocal(false);
     }
@@ -181,7 +191,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [loadSerial]);
 
   if (loading) {
     return (
@@ -226,7 +236,7 @@ export default function App() {
               <div style={{ marginTop: 8 }}>
                 <div style={{ display: "flex", gap: 12 }}>
                   <button 
-                    onClick={() => window.location.reload()} 
+                    onClick={() => setLoadSerial((current) => current + 1)}
                     className="button"
                     style={{ cursor: "pointer", background: "var(--foreground)", color: "var(--background)", border: "none", padding: "8px 16px" }}
                   >

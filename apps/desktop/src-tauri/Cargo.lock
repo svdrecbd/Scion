@@ -572,6 +572,7 @@ dependencies = [
 name = "cell-anatomy-workbench"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "log",
  "rfd",
  "serde",
@@ -580,6 +581,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tauri-plugin-shell",
+ "tokio",
 ]
 
 [[package]]

@@ -104,6 +104,19 @@
         border-left: 4px solid var(--accent);
         padding-left: 14px;
       }
+
+      .status-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      .status-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+      }
     </style>
   </head>
   <body>
@@ -111,8 +124,211 @@
       <header>
         <p class="meta">Private working note. Keep internal planning here in HTML, not Markdown.</p>
         <h1>Cell Anatomy Maternote</h1>
-        <p class="muted">Last updated: May 24, 2026</p>
+        <p class="muted">Last updated: May 26, 2026</p>
       </header>
+
+      <section class="panel">
+        <h2>Current State</h2>
+        <p>
+          Cell Anatomy is being treated as one platform direction: the public Atlas for scoping the
+          literature and CAOS, the Cell Anatomy Operating System, for local volume inspection and
+          workbench-style analysis. The public site should stay conservative and only show what is
+          ready to stand behind.
+        </p>
+        <p>
+          Latest pushed commit: <code>cf50de0 Add CAOS workbench and account groundwork</code>.
+          Production deploy on <code>cellanatomy.org</code> was updated after killing a stale May 19
+          Next process that was still bound to port <code>3000</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Shipped Since Last Note</h2>
+        <div class="status-grid">
+          <article class="status-card">
+            <h3>Public Site</h3>
+            <ul>
+              <li>Added a public <code>CAOS</code> nav tab and <code>/caos</code> page.</li>
+              <li>Added the current Workbench screenshot to the CAOS page.</li>
+              <li>Kept CAOS copy brief and directional, without over-promising future functionality.</li>
+              <li>Updated the landing page with a CC BY 4.0 microscopy visual from Laundon et al. Figshare 7346750.</li>
+              <li>Fixed landing image margins and attribution contrast after visual QA.</li>
+              <li>Removed the visible public Account nav link for now, while leaving account groundwork in code.</li>
+            </ul>
+          </article>
+
+          <article class="status-card">
+            <h3>Workbench / CAOS</h3>
+            <ul>
+              <li>Renamed the top-left Workbench label to <code>OPERATING SYSTEM</code>.</li>
+              <li>Improved orthogonal viewer sizing so image planes keep sane aspect behavior.</li>
+              <li>Changed volume selector wording from indexed to loadable, making the browser limit clearer.</li>
+              <li>Added more OS-like Workbench surface area: measurement, ROI, jobs, plan, notes, save/export/bundle controls.</li>
+              <li>Added job queue/indexing surfaces for local volume handling and better future import workflow.</li>
+              <li>Kept density preview alive as an experimental surface, not a promoted feature.</li>
+            </ul>
+          </article>
+
+          <article class="status-card">
+            <h3>Account Groundwork</h3>
+            <ul>
+              <li>Added email-code account routes and database migrations.</li>
+              <li>Added Workbench device pairing groundwork.</li>
+              <li>Local login codes still write to <code>apps/api/.run/auth-codes.log</code> unless SMTP is configured.</li>
+              <li>Account system remains on the back burner for product rollout.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Deployment Notes</h2>
+        <p>
+          Production deploy currently uses the repo at <code>/opt/scion</code>. The API listens on
+          <code>127.0.0.1:8000</code> and the web server listens on <code>127.0.0.1:3000</code>.
+          The successful post-deploy readiness response was:
+        </p>
+        <pre><code>{"status":"ready","dataset_records":118,"applied_migrations":6}</code></pre>
+        <p>
+          Important operational lesson: <code>scripts/stop_stack.sh</code> only stops processes it
+          knows through the stack PID files. A stale unmanaged <code>next-server</code> from May 19
+          stayed bound to port <code>3000</code> and caused the public site to serve the old build.
+          If production looks stale, inspect the actual process bound to the port.
+        </p>
+        <pre><code>WEB_PID=$(ss -ltnp 'sport = :3000' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+ps -fp "$WEB_PID"
+readlink -f /proc/$WEB_PID/cwd</code></pre>
+        <p>
+          If a stale web process is serving the old build, kill it, clean-build, and restart:
+        </p>
+        <pre><code>cd /opt/scion
+kill "$WEB_PID"
+rm -rf apps/web/.next
+make web-build
+scripts/start_stack.sh</code></pre>
+        <p>
+          Confirm both local and public routes after deployment:
+        </p>
+        <pre><code>curl -fsS http://127.0.0.1:3000/ | grep -o 'CAOS' | head
+curl -fsS http://127.0.0.1:3000/caos | grep -o 'CAOS' | head
+curl -fsS http://127.0.0.1:8000/api/health/ready
+curl -fsS https://cellanatomy.org/ | grep -o 'CAOS' | head
+curl -fsS https://cellanatomy.org/caos | grep -o 'CAOS' | head</code></pre>
+      </section>
+
+      <section>
+        <h2>Things Remaining To Do</h2>
+        <h3>Public Site</h3>
+        <ul>
+          <li>Keep public copy conservative until Workbench functionality is ready to distribute.</li>
+          <li>Review the landing page with the other lead before doing a bigger redesign.</li>
+          <li>Decide whether <code>Data</code> should remain visible publicly or stay pilot-gated.</li>
+          <li>Make sure any public imagery has clear license and attribution notes.</li>
+        </ul>
+
+        <h3>Workbench / CAOS</h3>
+        <ul>
+          <li>Make local import/indexing more robust and obvious for arbitrary user data.</li>
+          <li>Improve job status, failed-job recovery, and background indexing affordances.</li>
+          <li>Decide what density preview is actually for before promoting it; keep it experimental until it answers a clear user need.</li>
+          <li>Add stronger project persistence: saved sessions, datasets, measurements, ROIs, notes, jobs, and exports.</li>
+          <li>Move toward a real idea-to-publication workflow: plan, inspect, measure, annotate, run jobs, export evidence, and package outputs.</li>
+          <li>Eventually package the native app as a downloadable macOS <code>.dmg</code>.</li>
+        </ul>
+
+        <h3>Accounts</h3>
+        <ul>
+          <li>Do not promote accounts publicly yet.</li>
+          <li>Before enabling accounts in production, configure real transactional email, finalize privacy/security contacts, and review data retention expectations.</li>
+          <li>Future account value: persistent projects, cross-device continuity, Atlas-to-Workbench handoff, device pairing, and eventually GitHub-linked workflows.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>CAOS Full Operating System Vision</h2>
+        <p>
+          This section is intentionally expansive. These are internal product directions and moonshot
+          ideas, not public commitments. Keep them here so the team can see the full possible arc
+          while deciding what is actually worth building.
+        </p>
+
+        <h3>Core Operating System Shape</h3>
+        <ul>
+          <li><strong>Atlas layer:</strong> public field map for literature, datasets, modalities, reporting completeness, precedent, and gaps.</li>
+          <li><strong>Workbench layer:</strong> local/native environment for opening user data, inspecting volumes, measuring structures, defining ROIs, and running jobs.</li>
+          <li><strong>Project layer:</strong> persistent project files that contain datasets, views, measurements, notes, ROIs, jobs, exports, and provenance.</li>
+          <li><strong>Analysis layer:</strong> calibrated tools for measurements, segmentation-adjacent workflows, quality checks, density/intensity summaries, and reusable exports.</li>
+          <li><strong>Publication layer:</strong> clean outputs for figures, methods tables, provenance reports, CSV/JSON bundles, and eventually manuscript-support packages.</li>
+        </ul>
+
+        <h3>Idea To Publication Flow</h3>
+        <ul>
+          <li>Start with a biological question or target structure.</li>
+          <li>Use the Atlas to find precedent, comparable datasets, common resolutions, reporting norms, and field gaps.</li>
+          <li>Open public or local data in the Workbench.</li>
+          <li>Create calibrated measurements, ROIs, notes, and view states tied to exact volume coordinates.</li>
+          <li>Run local jobs for indexing, summaries, previews, exports, and later analysis modules.</li>
+          <li>Bundle the work into shareable project artifacts with provenance, figures, and machine-readable outputs.</li>
+          <li>Use the final bundle to support papers, grant planning, reviews, internal reports, or reproducibility packages.</li>
+        </ul>
+
+        <h3>Near-Term OS Features</h3>
+        <ul>
+          <li>Project save/load that restores dataset, asset, view mode, slice position, contrast, colormap, measurements, ROIs, notes, and jobs.</li>
+          <li>Local folder indexing with clear queue states, retries, failure explanations, and validated metadata summaries.</li>
+          <li>Measurement and ROI exports that are useful outside the app without manual cleanup.</li>
+          <li>Atlas-to-Workbench handoff: public record opens relevant local/public volume context when available.</li>
+          <li>Workbench-to-Atlas handoff: local observations can be used to update planning or comparison context.</li>
+          <li>Better density preview with a real purpose: structure finding, intensity summary, segmentation planning, or quality assessment.</li>
+          <li>Native macOS packaging as a downloadable <code>.dmg</code>.</li>
+        </ul>
+
+        <h3>Medium-Term OS Features</h3>
+        <ul>
+          <li>Project dashboard with recent volumes, pinned views, measurements, notes, and unfinished jobs.</li>
+          <li>Annotation system for structure labels, hypotheses, uncertainty, and review comments.</li>
+          <li>Versioned project history so users can recover or compare analysis states.</li>
+          <li>Plugin-like job modules for common workflows: downsampling, preview generation, measurements, masks, simple segmentation helpers, and figure exports.</li>
+          <li>Cross-volume comparison: align measurements and regions across related samples or conditions.</li>
+          <li>Validated data-readiness checks for dimensions, voxel size, dtype, missing chunks, metadata conflicts, and licensing notes.</li>
+          <li>Figure builder for reproducible panels: view state, scale bar, labels, contrast, colormap, and source metadata captured together.</li>
+        </ul>
+
+        <h3>Moonshot Ideas</h3>
+        <ul>
+          <li><strong>Cell anatomy notebook:</strong> a structured notebook where every claim is linked to volume coordinates, measurements, and source records.</li>
+          <li><strong>Autonomous literature-to-data scout:</strong> propose datasets, methods, and precedent from a research question, then create a Workbench project shell.</li>
+          <li><strong>Atlas-guided experiment planner:</strong> recommend resolution, sample count, modality, and reporting checklist based on field precedent and gaps.</li>
+          <li><strong>Collaborative review mode:</strong> multiple reviewers comment on the same regions, measurements, and figure states.</li>
+          <li><strong>Model-assisted structure finding:</strong> use learned or rule-based tools to suggest organelles, membranes, unusual regions, or likely artifacts.</li>
+          <li><strong>Reproducibility package generator:</strong> produce a methods appendix, data citation block, figure provenance, and machine-readable measurement archive.</li>
+          <li><strong>Protocol marketplace/library:</strong> reusable analysis recipes for specific modalities, organisms, organelles, and publication goals.</li>
+          <li><strong>Cloud-assisted optional compute:</strong> local-first by default, with optional remote jobs for heavy processing when compliance and cost are solved.</li>
+          <li><strong>GitHub-connected science workflow:</strong> export versioned project artifacts, issues, and provenance bundles into a repository for labs that work that way.</li>
+          <li><strong>Cell anatomy benchmark suite:</strong> standardized public tasks for comparing imaging workflows, segmentation tools, and measurement reproducibility.</li>
+        </ul>
+
+        <h3>Product Boundaries To Keep Asking</h3>
+        <ul>
+          <li>Who actually needs this?</li>
+          <li>What job does it do better than existing tools?</li>
+          <li>Does it move a user from idea to execution to publication?</li>
+          <li>Does it produce a reusable artifact, or just a neat visualization?</li>
+          <li>Can we explain the feature without pretending it is more complete than it is?</li>
+          <li>Can it work locally and privately before we ask users to trust cloud/account infrastructure?</li>
+        </ul>
+
+        <h3>Ideas Parking Lot</h3>
+        <ul>
+          <li>Dataset citation manager for volume projects.</li>
+          <li>Field-gap alerts when new public data appears in a target area.</li>
+          <li>Lab-local template projects for repeated organisms, modalities, or structures.</li>
+          <li>Review checklist for public-data readiness and metadata completeness.</li>
+          <li>Exportable “methods card” summarizing imaging, voxel size, sample count, processing, and measurement choices.</li>
+          <li>Interactive cell anatomy atlas view that links literature records to example volume slices.</li>
+          <li>Account-backed project sync only after local-first workflows are strong enough to justify it.</li>
+        </ul>
+      </section>
 
       <section class="panel">
         <h2>Email And Account Infrastructure</h2>

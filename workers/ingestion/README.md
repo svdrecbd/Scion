@@ -19,6 +19,134 @@ For the MVP, the goal is not full automation. The goal is a repeatable path from
 2. repository metadata JSON
 3. paper-level extraction pipeline
 
+## Archive Scanner
+
+Use `archive_scanner.py` for the first read-only pass over lab-local archives before upload, conversion, or analysis. It is dependency-light and writes scanner artifacts outside the source tree.
+
+Example fast inventory:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead
+```
+
+Example inventory with SHA-256 fixity:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead \
+  --checksum sha256
+```
+
+Resume a checksum pass against the same output directory:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead \
+  --checksum sha256 \
+  --resume-checksums
+```
+
+It writes:
+
+- `file-manifest.jsonl`
+- `inventory-summary.json`
+- `metadata-extraction.jsonl`
+- `metadata-gaps.csv`
+- `volume-candidates.csv`
+- `asset-status-ledger.jsonl`
+- `extension-summary.csv`
+- `largest-files.csv`
+- `scan-errors.csv`
+- `checksums.jsonl` when `--checksum sha256` is enabled
+- `fixity-run.json` when `--checksum sha256` is enabled
+
+The checksum resume mode reuses existing rows only when the relative path, checksum algorithm, file size, and modified timestamp still match. Duplicate detection is recalculated for the current scan order.
+
+The first extractor pass recognizes classic TIFF / OME-TIFF headers, MRC headers, Zarr `.zarray` metadata, and HDF5 signatures. Proprietary microscope formats are inventoried and classified as candidates, but still need follow-up extractors. `metadata-gaps.csv` is the review queue for missing dimensions, dtype, z depth, voxel size, unsupported extractors, and deferred HDF5 internals. `asset-status-ledger.jsonl` seeds every discovered file with conservative unknown rights/publication/triage status and disables cloud, conversion, sharing, and publication operations until a human or registry process upgrades the asset.
+
+## Private Archive Registry
+
+Use `archive_registry.py` after a scanner run to turn scanner artifacts into a CAOS-readable private registry. This is still local file output; it does not upload, sync, or make anything public.
+
+```bash
+python3 workers/ingestion/archive_registry.py import-scan \
+  ~/Downloads/cell-anatomy-archive-scan \
+  --output-dir ~/Downloads/cell-anatomy-private-registry \
+  --registry-id lbnl-beachhead-registry
+```
+
+It writes:
+
+- `private-registry.json`
+- `private-registry-assets.jsonl`
+- `private-registry-search-index.jsonl`
+- `private-registry-review-queue.csv`
+- `private-registry-volume-candidates.csv`
+
+The importer joins file manifest rows, checksums, metadata extraction, metadata gaps, volume candidates, and asset status rows. Directory-backed volume candidates such as Zarr stores are represented as logical `directory_volume` assets even when the scanner only saw component files. Imported assets remain blocked for CAOS viewing, conversion, cloud backup, sharing, and publication until their rights and triage status are curated.
+
+The native Workbench opens `private-registry.json` and queries `private-registry-assets.jsonl` through a bounded Rust command. React receives only the visible project-ready, conversion-queue, and review pages; it does not need to parse every registry asset row for desktop use.
+
+For the local public-data pilot bundle, import `pilot-index.json` plus each dataset's readiness, derivative, validation, and asset-state manifests directly:
+
+```bash
+python3 workers/ingestion/archive_registry.py import-public-data \
+  ~/Downloads/scion-public-data \
+  --output-dir ~/Downloads/scion-public-data-registry \
+  --registry-id scion-public-data-local-registry
+```
+
+This writes the same registry artifact set as `import-scan`, but treats the public-data manifests as the authoritative status overlay. Mirrored source files keep their source SHA-256 and validated conversion metadata, while converted OME-Zarr stores are imported as logical `directory_volume` assets with a deterministic `sha256-tree-v1` composite checksum. Converted derivatives whose validation passed are marked `project_ready` and `can_view_in_caos`; raw source files remain conversion candidates, not directly project-ready assets.
+
+## Pilot Reports
+
+Use `archive_pilot_report.py` to generate a local report for one selected pilot subset after the private registry exists. A pilot report is read-only and can be regenerated many times with different selectors.
+
+Candidate subset example:
+
+```bash
+python3 workers/ingestion/archive_pilot_report.py report \
+  ~/Downloads/cell-anatomy-private-registry \
+  --output-dir ~/Downloads/cell-anatomy-pilots/pilot-candidate \
+  --pilot-id pilot-candidate \
+  --title "Unmined Candidate Pilot" \
+  --kind candidate \
+  --path-prefix raw/candidate-folder/ \
+  --volume-candidates-only
+```
+
+Other selectors:
+
+- `--asset-id <asset-id>` for exact registry assets
+- `--query <term>` for search-index-backed matching
+- `--all` for a whole-registry report
+- `--limit <n>` for a bounded first review pass
+
+Project-ready public OME-Zarr report example:
+
+```bash
+python3 workers/ingestion/archive_pilot_report.py report \
+  ~/Downloads/scion-public-data-registry \
+  --output-dir ~/Downloads/cell-anatomy-pilots/scion-public-ome-zarr \
+  --pilot-id scion-public-data-ome-zarr-ready \
+  --title "SCION Public Data OME-Zarr Ready Volumes" \
+  --kind candidate \
+  --query ome.zarr
+```
+
+It writes:
+
+- `pilot-report.json`
+- `pilot-report.md`
+- `pilot-assets.csv`
+- `pilot-review-queue.csv`
+
+The report summarizes selected bytes, formats, volume candidates, checksum coverage, metadata readiness, project readiness, blockers, metadata gaps, findings, and next steps. It is intended for local review with the lead before any cloud upload, conversion, or scientific mining claims.
+
 ## Public Data Pilot
 
 Use `public_data_pilot.py` for dependency-light EMPIAR and Figshare ingest tests before any cloud or OME-Zarr work.

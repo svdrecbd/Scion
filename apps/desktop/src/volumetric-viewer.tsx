@@ -101,6 +101,9 @@ const formatMeasurementDistance = (distanceUm: number) => {
   return `${distanceUm.toFixed(1)} µm`;
 };
 
+const clampVoxelIndex = (value: number, size: number) =>
+  Math.max(0, Math.min(Math.round(value), Math.max(0, size - 1)));
+
 const touchCachedSlice = (key: string, entry: CachedSlice) => {
   sliceCache.delete(key);
   sliceCache.set(key, { ...entry, loadedAt: Date.now() });
@@ -413,6 +416,7 @@ export function VolumetricViewer({
   variant = "stage",
 }: VolumetricViewerProps) {
   const stageWrapRef = useRef<HTMLDivElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   
@@ -432,6 +436,7 @@ export function VolumetricViewer({
   // Loading states
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamRetryNonce, setStreamRetryNonce] = useState(0);
   const onLoadingChangeRef = useRef(onLoadingChange);
   
   // 2D Dimensions
@@ -599,6 +604,7 @@ export function VolumetricViewer({
   useEffect(() => {
     if (viewMode !== "2d") return;
     let cancelled = false;
+    let retryTimeout: number | null = null;
     const controller = new AbortController();
     const cacheKey = getSliceCacheKey(dataset, asset, axis, slice);
     const cached = sliceCache.get(cacheKey);
@@ -608,6 +614,11 @@ export function VolumetricViewer({
       setError(null);
       setInspectCoords(null);
       setInspectVal(null);
+      if (!cached) {
+        sliceDataRef.current = null;
+        setSliceWidth(0);
+        setSliceHeight(0);
+      }
 
       try {
         const payload = await fetchSlicePayload(dataset, asset, axis, slice, controller.signal);
@@ -691,6 +702,11 @@ export function VolumetricViewer({
         }
         if (!cancelled) {
           setError(err.message || "Failed to load voxel slice from the sidecar.");
+          retryTimeout = window.setTimeout(() => {
+            if (!cancelled) {
+              setStreamRetryNonce((value) => value + 1);
+            }
+          }, 1500);
         }
       } finally {
         if (!cancelled) {
@@ -703,14 +719,18 @@ export function VolumetricViewer({
 
     return () => {
       cancelled = true;
+      if (retryTimeout !== null) {
+        window.clearTimeout(retryTimeout);
+      }
       controller.abort();
     };
-  }, [dataset, asset, axis, slice, viewMode, zMax, yMax, xMax]);
+  }, [dataset, asset, axis, slice, viewMode, zMax, yMax, xMax, streamRetryNonce]);
 
   // Fetch 3D Downsampled Volume
   useEffect(() => {
     if (viewMode !== "3d") return;
     let cancelled = false;
+    let retryTimeout: number | null = null;
     const controller = new AbortController();
 
     async function fetch3DVolume() {
@@ -800,6 +820,11 @@ export function VolumetricViewer({
         }
         if (!cancelled) {
           setError(err.message || "Failed to stream 3D volume buffer.");
+          retryTimeout = window.setTimeout(() => {
+            if (!cancelled) {
+              setStreamRetryNonce((value) => value + 1);
+            }
+          }, 1500);
         }
       } finally {
         if (!cancelled) {
@@ -812,9 +837,12 @@ export function VolumetricViewer({
 
     return () => {
       cancelled = true;
+      if (retryTimeout !== null) {
+        window.clearTimeout(retryTimeout);
+      }
       controller.abort();
     };
-  }, [dataset, asset, downsample, viewMode]);
+  }, [dataset, asset, downsample, viewMode, streamRetryNonce]);
 
   // Compute rotation matrix for col-major uniform transmission
   const rotationMatrix = useMemo(() => {
@@ -997,21 +1025,21 @@ export function VolumetricViewer({
 
   // Size listener to update observed display size
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const element = surfaceRef.current || canvasRef.current;
+    if (!element) return;
 
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        if (entry.target === canvas) {
-          const w = entry.contentRect.width || canvas.clientWidth;
-          const h = entry.contentRect.height || canvas.clientHeight;
+        if (entry.target === element) {
+          const w = entry.contentRect.width || element.clientWidth;
+          const h = entry.contentRect.height || element.clientHeight;
           setCanvasDisplay({ width: w, height: h });
         }
       }
     });
 
-    observer.observe(canvas);
-    setCanvasDisplay({ width: canvas.clientWidth, height: canvas.clientHeight });
+    observer.observe(element);
+    setCanvasDisplay({ width: element.clientWidth, height: element.clientHeight });
 
     return () => {
       observer.disconnect();
@@ -1023,14 +1051,15 @@ export function VolumetricViewer({
     const data = sliceDataRef.current;
     if (!canvas || !data || sliceWidth === 0 || sliceHeight === 0) return null;
 
-    const rect = canvas.getBoundingClientRect();
+    const rect = surfaceRef.current?.getBoundingClientRect() || canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
     const xRatio = (e.clientX - rect.left) / rect.width;
     const yRatio = (e.clientY - rect.top) / rect.height;
 
-    const px = Math.floor(xRatio * sliceWidth);
-    const py = Math.floor(yRatio * sliceHeight);
+    if (xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) return null;
 
-    if (px < 0 || px >= sliceWidth || py < 0 || py >= sliceHeight) return null;
+    const px = Math.min(sliceWidth - 1, Math.floor(xRatio * sliceWidth));
+    const py = Math.min(sliceHeight - 1, Math.floor(yRatio * sliceHeight));
 
     const idx = py * sliceWidth + px;
     if (idx >= data.length) return null;
@@ -1150,14 +1179,13 @@ export function VolumetricViewer({
     const vy = Number(physicalVoxelSizeNm.y || 1.0);
     const vz = Number(physicalVoxelSizeNm.z || 1.0);
 
-    if (axis === "z") {
-      return (xMax * vx) / (yMax * vy);
-    } else if (axis === "y") {
-      return (xMax * vx) / (zMax * vz);
-    } else {
-      return (yMax * vy) / (zMax * vz);
-    }
-  }, [physicalVoxelSizeNm, axis, zMax, yMax, xMax, sliceWidth, sliceHeight]);
+    const horizontalVoxelNm = axis === "x" ? vy : vx;
+    const verticalVoxelNm = axis === "z" ? vy : vz;
+    const widthNm = sliceWidth * horizontalVoxelNm;
+    const heightNm = sliceHeight * verticalVoxelNm;
+
+    return widthNm > 0 && heightNm > 0 ? widthNm / heightNm : 1.0;
+  }, [physicalVoxelSizeNm, axis, sliceWidth, sliceHeight]);
 
   const fittedCanvasSize = useMemo(() => {
     if (viewMode !== "2d") {
@@ -1228,45 +1256,50 @@ export function VolumetricViewer({
     return { widthCss, label };
   }, [physicalVoxelSizeNm, axis, sliceWidth, canvasDisplay.width, viewMode]);
 
-  const crosshairPosition = useMemo(() => {
-    if (!crosshair || viewMode !== "2d") return null;
+  const planeDimensions = useMemo(() => {
+    const fallback =
+      axis === "z"
+        ? { width: xMax, height: yMax }
+        : axis === "y"
+        ? { width: xMax, height: zMax }
+        : { width: yMax, height: zMax };
+    return {
+      width: sliceWidth || fallback.width,
+      height: sliceHeight || fallback.height,
+    };
+  }, [axis, xMax, yMax, zMax, sliceWidth, sliceHeight]);
 
+  const pointPlaneIndices = (point: VoxelPoint) => {
     if (axis === "z") {
-      return {
-        x: xMax > 1 ? (crosshair.x / (xMax - 1)) * 100 : 50,
-        y: yMax > 1 ? (crosshair.y / (yMax - 1)) * 100 : 50,
-      };
+      return { x: point.x, y: point.y };
     }
     if (axis === "y") {
-      return {
-        x: xMax > 1 ? (crosshair.x / (xMax - 1)) * 100 : 50,
-        y: zMax > 1 ? (crosshair.z / (zMax - 1)) * 100 : 50,
-      };
+      return { x: point.x, y: point.z };
     }
-    return {
-      x: yMax > 1 ? (crosshair.y / (yMax - 1)) * 100 : 50,
-      y: zMax > 1 ? (crosshair.z / (zMax - 1)) * 100 : 50,
-    };
-  }, [crosshair, viewMode, axis, xMax, yMax, zMax]);
+    return { x: point.y, y: point.z };
+  };
 
   const projectPointToPlane = (point: VoxelPoint) => {
-    if (axis === "z") {
-      return {
-        x: xMax > 1 ? (point.x / (xMax - 1)) * 100 : 50,
-        y: yMax > 1 ? (point.y / (yMax - 1)) * 100 : 50,
-      };
-    }
-    if (axis === "y") {
-      return {
-        x: xMax > 1 ? (point.x / (xMax - 1)) * 100 : 50,
-        y: zMax > 1 ? (point.z / (zMax - 1)) * 100 : 50,
-      };
-    }
+    const indices = pointPlaneIndices(point);
+    const width = Math.max(1, planeDimensions.width);
+    const height = Math.max(1, planeDimensions.height);
+    const displayWidth = Math.max(1, canvasDisplay.width);
+    const displayHeight = Math.max(1, canvasDisplay.height);
+    const x = clampVoxelIndex(indices.x, width);
+    const y = clampVoxelIndex(indices.y, height);
     return {
-      x: yMax > 1 ? (point.y / (yMax - 1)) * 100 : 50,
-      y: zMax > 1 ? (point.z / (zMax - 1)) * 100 : 50,
+      x: ((x + 0.5) / width) * displayWidth,
+      y: ((y + 0.5) / height) * displayHeight,
     };
   };
+
+  const overlayWidth = Math.max(1, canvasDisplay.width);
+  const overlayHeight = Math.max(1, canvasDisplay.height);
+
+  const crosshairPosition = useMemo(() => {
+    if (!crosshair || viewMode !== "2d") return null;
+    return projectPointToPlane(crosshair);
+  }, [crosshair, viewMode, axis, planeDimensions.width, planeDimensions.height, canvasDisplay.width, canvasDisplay.height]);
 
   const visibleMeasurements = useMemo(() => {
     if (viewMode !== "2d") return [];
@@ -1277,7 +1310,7 @@ export function VolumetricViewer({
         startPlane: projectPointToPlane(measurement.start),
         endPlane: projectPointToPlane(measurement.end),
       }));
-  }, [measurements, viewMode, axis, slice, xMax, yMax, zMax]);
+  }, [measurements, viewMode, axis, slice, planeDimensions.width, planeDimensions.height, canvasDisplay.width, canvasDisplay.height]);
 
   const visibleRois = useMemo(() => {
     if (viewMode !== "2d") return [];
@@ -1288,7 +1321,7 @@ export function VolumetricViewer({
         startPlane: projectPointToPlane(roi.start),
         endPlane: roi.end ? projectPointToPlane(roi.end) : null,
       }));
-  }, [rois, viewMode, axis, slice, xMax, yMax, zMax]);
+  }, [rois, viewMode, axis, slice, planeDimensions.width, planeDimensions.height, canvasDisplay.width, canvasDisplay.height]);
 
   const draftPlanePoint = useMemo(() => {
     if (!measurementDraftPoint || viewMode !== "2d") return null;
@@ -1297,7 +1330,7 @@ export function VolumetricViewer({
       (axis === "y" && measurementDraftPoint.y === slice) ||
       (axis === "x" && measurementDraftPoint.x === slice);
     return onPlane ? projectPointToPlane(measurementDraftPoint) : null;
-  }, [measurementDraftPoint, viewMode, axis, slice, xMax, yMax, zMax]);
+  }, [measurementDraftPoint, viewMode, axis, slice, planeDimensions.width, planeDimensions.height, canvasDisplay.width, canvasDisplay.height]);
 
   const roiDraftPlanePoint = useMemo(() => {
     if (!roiDraftPoint || viewMode !== "2d") return null;
@@ -1306,7 +1339,13 @@ export function VolumetricViewer({
       (axis === "y" && roiDraftPoint.y === slice) ||
       (axis === "x" && roiDraftPoint.x === slice);
     return onPlane ? projectPointToPlane(roiDraftPoint) : null;
-  }, [roiDraftPoint, viewMode, axis, slice, xMax, yMax, zMax]);
+  }, [roiDraftPoint, viewMode, axis, slice, planeDimensions.width, planeDimensions.height, canvasDisplay.width, canvasDisplay.height]);
+
+  const planeReadoutLabels = useMemo(() => {
+    if (axis === "z") return { horizontal: "X", vertical: "Y" };
+    if (axis === "y") return { horizontal: "X", vertical: "Z" };
+    return { horizontal: "Y", vertical: "Z" };
+  }, [axis]);
 
   const interactionCursor =
     viewMode === "3d"
@@ -1351,6 +1390,7 @@ export function VolumetricViewer({
       <div ref={stageWrapRef} className="stage-canvas-wrap" style={{ position: "relative", width: "100%", flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 0 }}>
         {/* Render centered relative container with corrected aspect ratios */}
         <div
+          ref={surfaceRef}
           style={{
             position: "relative",
             maxWidth: "100%",
@@ -1374,12 +1414,12 @@ export function VolumetricViewer({
               height: "100%",
               cursor: interactionCursor,
               imageRendering: "pixelated",
-              objectFit: "contain",
             }}
           />
 
           {title ? (
             <div
+              className="viewer-overlay-label"
               style={{
                 position: "absolute",
                 top: 10,
@@ -1401,24 +1441,26 @@ export function VolumetricViewer({
           ) : null}
 
           {crosshairPosition && !error && !loading ? (
-            <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+            <div className="viewer-crosshair-overlay" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
               <div
+                className="viewer-crosshair-line"
                 style={{
                   position: "absolute",
                   top: 0,
                   bottom: 0,
-                  left: `${crosshairPosition.x}%`,
+                  left: crosshairPosition.x,
                   width: 1,
                   background: "rgba(198, 111, 45, 0.86)",
                   boxShadow: "0 0 0 1px rgba(0,0,0,0.35)",
                 }}
               />
               <div
+                className="viewer-crosshair-line"
                 style={{
                   position: "absolute",
                   left: 0,
                   right: 0,
-                  top: `${crosshairPosition.y}%`,
+                  top: crosshairPosition.y,
                   height: 1,
                   background: "rgba(198, 111, 45, 0.86)",
                   boxShadow: "0 0 0 1px rgba(0,0,0,0.35)",
@@ -1429,7 +1471,8 @@ export function VolumetricViewer({
 
           {(visibleMeasurements.length > 0 || draftPlanePoint || visibleRois.length > 0 || roiDraftPlanePoint) && !error ? (
             <svg
-              viewBox="0 0 100 100"
+              className="viewer-annotation-overlay"
+              viewBox={`0 0 ${overlayWidth} ${overlayHeight}`}
               preserveAspectRatio="none"
               style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
             >
@@ -1440,20 +1483,20 @@ export function VolumetricViewer({
                   const y = Math.min(roi.startPlane.y, roi.endPlane.y);
                   const width = Math.abs(roi.endPlane.x - roi.startPlane.x);
                   const height = Math.abs(roi.endPlane.y - roi.startPlane.y);
-                  const safeWidth = Math.max(0.8, width);
-                  const safeHeight = Math.max(0.8, height);
+                  const safeWidth = Math.max(1, width);
+                  const safeHeight = Math.max(1, height);
                   return (
                     <g key={roi.id}>
-                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="rgba(31, 111, 135, 0.08)" stroke="rgba(255, 255, 255, 0.95)" strokeWidth={0.36} vectorEffect="non-scaling-stroke" />
-                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="none" stroke={color} strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="rgba(31, 111, 135, 0.08)" stroke="rgba(255, 255, 255, 0.95)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                      <rect x={x} y={y} width={safeWidth} height={safeHeight} fill="none" stroke={color} strokeWidth={1} vectorEffect="non-scaling-stroke" />
                       <text
                         x={x + safeWidth / 2}
-                        y={Math.max(2.6, y - 1.1)}
+                        y={Math.max(12, y - 8)}
                         fill="#fbf8ef"
                         stroke="rgba(0, 0, 0, 0.82)"
-                        strokeWidth={0.5}
+                        strokeWidth={3}
                         paintOrder="stroke"
-                        fontSize={3}
+                        fontSize={11}
                         fontFamily="var(--font-display)"
                         fontWeight={700}
                         letterSpacing={0}
@@ -1467,17 +1510,17 @@ export function VolumetricViewer({
                 }
                 return (
                   <g key={roi.id}>
-                    <circle cx={roi.startPlane.x} cy={roi.startPlane.y} r={1.2} fill={color} stroke="rgba(255,255,255,0.95)" strokeWidth={0.22} vectorEffect="non-scaling-stroke" />
-                    <line x1={roi.startPlane.x - 2.2} y1={roi.startPlane.y} x2={roi.startPlane.x + 2.2} y2={roi.startPlane.y} stroke="rgba(255,255,255,0.9)" strokeWidth={0.14} vectorEffect="non-scaling-stroke" />
-                    <line x1={roi.startPlane.x} y1={roi.startPlane.y - 2.2} x2={roi.startPlane.x} y2={roi.startPlane.y + 2.2} stroke="rgba(255,255,255,0.9)" strokeWidth={0.14} vectorEffect="non-scaling-stroke" />
+                    <circle cx={roi.startPlane.x} cy={roi.startPlane.y} r={7} fill={color} stroke="rgba(255,255,255,0.95)" strokeWidth={1.4} vectorEffect="non-scaling-stroke" />
+                    <line x1={roi.startPlane.x - 12} y1={roi.startPlane.y} x2={roi.startPlane.x + 12} y2={roi.startPlane.y} stroke="rgba(255,255,255,0.9)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                    <line x1={roi.startPlane.x} y1={roi.startPlane.y - 12} x2={roi.startPlane.x} y2={roi.startPlane.y + 12} stroke="rgba(255,255,255,0.9)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
                     <text
                       x={roi.startPlane.x}
-                      y={roi.startPlane.y - 2.8}
+                      y={roi.startPlane.y - 16}
                       fill="#fbf8ef"
                       stroke="rgba(0, 0, 0, 0.82)"
-                      strokeWidth={0.5}
+                      strokeWidth={3}
                       paintOrder="stroke"
-                      fontSize={3}
+                      fontSize={11}
                       fontFamily="var(--font-display)"
                       fontWeight={700}
                       letterSpacing={0}
@@ -1497,7 +1540,7 @@ export function VolumetricViewer({
                     x2={measurement.endPlane.x}
                     y2={measurement.endPlane.y}
                     stroke="rgba(255, 255, 255, 0.95)"
-                    strokeWidth={0.32}
+                    strokeWidth={2}
                     vectorEffect="non-scaling-stroke"
                   />
                   <line
@@ -1506,21 +1549,21 @@ export function VolumetricViewer({
                     x2={measurement.endPlane.x}
                     y2={measurement.endPlane.y}
                     stroke="rgba(198, 111, 45, 0.92)"
-                    strokeWidth={0.16}
+                    strokeWidth={1.2}
                     vectorEffect="non-scaling-stroke"
                   />
-                  <circle cx={measurement.startPlane.x} cy={measurement.startPlane.y} r={0.75} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
-                  <circle cx={measurement.endPlane.x} cy={measurement.endPlane.y} r={0.75} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <circle cx={measurement.startPlane.x} cy={measurement.startPlane.y} r={5} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <circle cx={measurement.endPlane.x} cy={measurement.endPlane.y} r={5} fill="rgba(198, 111, 45, 0.95)" vectorEffect="non-scaling-stroke" />
                   <text
                     x={(measurement.startPlane.x + measurement.endPlane.x) / 2}
                     y={(measurement.startPlane.y + measurement.endPlane.y) / 2}
-                    dx={1.1}
-                    dy={-1.1}
+                    dx={8}
+                    dy={-8}
                     fill="#fbf8ef"
                     stroke="rgba(0, 0, 0, 0.82)"
-                    strokeWidth={0.5}
+                    strokeWidth={3}
                     paintOrder="stroke"
-                    fontSize={3.1}
+                    fontSize={11}
                     fontFamily="var(--font-display)"
                     fontWeight={700}
                     letterSpacing={0}
@@ -1533,14 +1576,14 @@ export function VolumetricViewer({
               ))}
               {draftPlanePoint ? (
                 <g>
-                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={1.0} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
-                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={1.85} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={6} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <circle cx={draftPlanePoint.x} cy={draftPlanePoint.y} r={11} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
                 </g>
               ) : null}
               {roiDraftPlanePoint ? (
                 <g>
-                  <circle cx={roiDraftPlanePoint.x} cy={roiDraftPlanePoint.y} r={1.05} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
-                  <rect x={roiDraftPlanePoint.x - 1.7} y={roiDraftPlanePoint.y - 1.7} width={3.4} height={3.4} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={0.18} vectorEffect="non-scaling-stroke" />
+                  <circle cx={roiDraftPlanePoint.x} cy={roiDraftPlanePoint.y} r={6} fill="rgba(31, 111, 135, 0.95)" vectorEffect="non-scaling-stroke" />
+                  <rect x={roiDraftPlanePoint.x - 10} y={roiDraftPlanePoint.y - 10} width={20} height={20} fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
                 </g>
               ) : null}
             </svg>
@@ -1586,6 +1629,7 @@ export function VolumetricViewer({
           {/* 3D rotation overlay instructions */}
           {viewMode === "3d" && !error && !loading ? (
             <div
+              className="viewer-overlay-label viewer-3d-instruction"
               style={{
                 position: "absolute",
                 top: 16,
@@ -1660,7 +1704,7 @@ export function VolumetricViewer({
           {viewMode === "2d" ? (
             inspectCoords && inspectVal !== null ? (
               <span>
-                X:{inspectCoords.x} Y:{inspectCoords.y} ➔ Value: {inspectVal}
+                {planeReadoutLabels.horizontal}:{inspectCoords.x} {planeReadoutLabels.vertical}:{inspectCoords.y} ➔ Value: {inspectVal}
               </span>
             ) : (
               <span className="muted" style={{ fontStyle: "italic", fontWeight: "normal", color: "#5c5a52" }}>

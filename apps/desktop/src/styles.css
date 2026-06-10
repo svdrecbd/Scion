@@ -547,3 +547,30 @@ code {
     height: 52vh;
   }
 }
+
+.workbench-mirror-mode {
+  grid-template-columns: 360px 300px minmax(0, 1fr);
+  grid-template-areas: "ledger controls viewer";
+}
+
+.workbench-mirror-mode .cockpit-panel-left,
+.workbench-mirror-mode .cockpit-panel-right {
+  border-left: none;
+  border-right: 1px solid var(--border);
+}
+
+@media (max-width: 920px) {
+  .workbench-mirror-mode {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "viewer"
+      "controls"
+      "ledger";
+  }
+
+  .workbench-mirror-mode .cockpit-panel-left,
+  .workbench-mirror-mode .cockpit-panel-right {
+    border-right: none;
+    border-top: 1px solid var(--border);
+  }
+}

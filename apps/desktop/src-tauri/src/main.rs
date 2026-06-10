@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  cell_anatomy_workbench_lib::run();
+    cell_anatomy_workbench_lib::run();
 }

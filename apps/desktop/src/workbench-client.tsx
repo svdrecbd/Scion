@@ -1,5 +1,26 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { WorkbenchLogo } from "./brand";
+import {
+  buildCaosProjectSnapshot,
+  caosProjectStableSignature,
+  parseCaosProjectSnapshot,
+  replaceVolumeScopedRecords,
+  resolveCaosProjectActiveVolume,
+  serializeCaosProjectSnapshot,
+  type CaosProjectNote,
+  type CaosProjectSnapshot,
+  type CaosViewState,
+  type CaosArchiveStatus,
+} from "./caos-project";
+import {
+  parsePrivateRegistryAssetsJsonl,
+  parsePrivateArchiveRegistryBundle,
+  parsePrivateRegistrySummary,
+  privateRegistryAssetStatusLabel,
+  type PrivateArchiveRegistryIndex,
+  type PrivateRegistryAsset,
+  type PrivateRegistrySummary,
+} from "./private-registry";
 import { MeasurementOverlay, OrthogonalViewer, RoiOverlay, VolumetricViewer, VoxelPoint } from "./volumetric-viewer";
 
 type CompatibilityReport = {
@@ -65,6 +86,76 @@ type RecentLocalDataset = {
   lastOpenedAt: string;
 };
 
+type RecentCaosProject = {
+  path: string;
+  name: string;
+  projectId: string;
+  datasetSlug: string;
+  assetPath: string;
+  updatedAt: string;
+  lastOpenedAt: string;
+};
+
+type NativeCaosProjectFile = {
+  path: string;
+  contents: string;
+};
+
+type NativeSavedCaosProjectFile = {
+  path: string;
+};
+
+type NativeSavedViewSnapshotFiles = {
+  pngPath: string;
+  metadataPath: string;
+};
+
+type NativePrivateRegistryFile = {
+  path: string;
+  summaryContents: string;
+  assetsContents: string;
+  searchContents?: string | null;
+  reviewQueueContents?: string | null;
+  volumeCandidatesContents?: string | null;
+};
+
+type NativePrivateRegistryIndexFile = {
+  path: string;
+  summaryContents: string;
+};
+
+type PrivateRegistryIndexSection = "project_ready" | "conversion_queue" | "review";
+
+type NativePrivateRegistryIndexQuery = {
+  registryPath: string;
+  section: PrivateRegistryIndexSection;
+  query: string;
+  queueFilter: PrivateRegistryQueueFilter;
+  offset: number;
+  limit: number;
+  matchedKeys?: string[];
+};
+
+type NativePrivateRegistryIndexQueryResult = {
+  registryPath: string;
+  section: PrivateRegistryIndexSection;
+  query: string;
+  queueFilter: PrivateRegistryQueueFilter;
+  offset: number;
+  limit: number;
+  totalCount: number;
+  assetsContents: string;
+};
+
+type PrivateRegistryAssetPage = {
+  assets: PrivateRegistryAsset[];
+  totalCount: number;
+  offset: number;
+  limit: number;
+  loading: boolean;
+  error: string | null;
+};
+
 type WorkbenchSessionSnapshot = {
   id: string;
   name: string;
@@ -101,6 +192,14 @@ type ImportStatus = {
   persisted?: boolean;
   registryPath?: string;
   report?: CompatibilityReport | null;
+};
+
+type ProjectRecoveryStatus = {
+  kind: "warning" | "error";
+  summary: string;
+  path?: string;
+  action?: "open-local-folder" | "retry-project-open";
+  actionPath?: string;
 };
 
 type MeasurementRecord = MeasurementOverlay & {
@@ -219,6 +318,13 @@ type IndexJobResponse = {
   error?: string;
 };
 
+type IndexQueueAssetMatch = {
+  dataset: IndexQueueDataset;
+  asset: IndexQueueAsset;
+};
+
+type PrivateRegistryQueueFilter = "all" | "ready" | "review" | "matched";
+
 export type PackagedDataset = {
   slug: string;
   title: string;
@@ -241,6 +347,7 @@ export type PackagedDataset = {
     byte_size: number;
     physical_voxel_size_nm: Record<string, string | number>;
     validation?: CompatibilityReport;
+    archiveStatus?: CaosArchiveStatus;
   }>;
   findings: Array<{
     finding_id: string;
@@ -266,14 +373,31 @@ const clampIndex = (value: number, max: number) => {
   return Math.max(0, Math.min(Math.round(value), Math.max(0, max - 1)));
 };
 
+const parseNumberParam = (value: string | null, fallback: number) => {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const parseAxisParam = (value: string | null): "z" | "y" | "x" => {
+  return value === "x" || value === "y" || value === "z" ? value : "z";
+};
+
+const parseViewModeParam = (value: string | null): "orthogonal" | "2d" | "3d" => {
+  return value === "orthogonal" || value === "2d" || value === "3d" ? value : "orthogonal";
+};
+
 const DEVICE_TOKEN_STORAGE_KEY = "cellAnatomyWorkbenchDeviceToken";
 const RECENT_LOCAL_DATASETS_STORAGE_KEY = "cellAnatomyWorkbenchRecentLocalDatasets";
+const RECENT_CAOS_PROJECTS_STORAGE_KEY = "cellAnatomyWorkbenchRecentCaosProjects";
+const LAST_CAOS_PROJECT_PATH_STORAGE_KEY = "cellAnatomyWorkbenchLastCaosProjectPath";
 const WORKBENCH_SESSIONS_STORAGE_KEY = "cellAnatomyWorkbenchSessions";
 const WORKBENCH_DRAFT_NOTE_STORAGE_KEY = "cellAnatomyWorkbenchDraftNote";
 const WORKBENCH_MEASUREMENTS_STORAGE_KEY = "cellAnatomyWorkbenchMeasurements";
 const WORKBENCH_ROIS_STORAGE_KEY = "cellAnatomyWorkbenchRois";
 const WORKBENCH_JOBS_STORAGE_KEY = "cellAnatomyWorkbenchJobs";
+const WORKBENCH_MIRROR_MODE_STORAGE_KEY = "cellAnatomyWorkbenchMirrorMode";
 const MAX_RECENT_LOCAL_DATASETS = 8;
+const MAX_RECENT_CAOS_PROJECTS = 8;
 const MAX_WORKBENCH_SESSIONS = 12;
 const MAX_WORKBENCH_MEASUREMENTS = 80;
 const MAX_WORKBENCH_ROIS = 120;
@@ -303,6 +427,28 @@ const INDEX_JOB_STATUS_LABELS: Record<string, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
+
+const PRIVATE_REGISTRY_QUEUE_FILTER_LABELS: Record<PrivateRegistryQueueFilter, string> = {
+  all: "All",
+  ready: "Ready",
+  review: "Review",
+  matched: "Matched",
+};
+
+const PRIVATE_REGISTRY_PAGE_LIMITS: Record<PrivateRegistryIndexSection, number> = {
+  project_ready: 4,
+  conversion_queue: 8,
+  review: 3,
+};
+
+const emptyPrivateRegistryAssetPage = (limit: number): PrivateRegistryAssetPage => ({
+  assets: [],
+  totalCount: 0,
+  offset: 0,
+  limit,
+  loading: false,
+  error: null,
+});
 
 const indexJobStatusTone = (status: string) => {
   if (status === "completed") return "var(--atlas-blue-dark)";
@@ -345,6 +491,15 @@ const writeStoredString = (key: string, value: string) => {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(key, value);
+  } catch {
+    // Local persistence is helpful but should never block viewing data.
+  }
+};
+
+const removeStoredValue = (key: string) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(key);
   } catch {
     // Local persistence is helpful but should never block viewing data.
   }
@@ -399,6 +554,110 @@ const formatDimensions = (dimensions?: Record<string, number | string> | null) =
 const formatVoxelPoint = (point: VoxelPoint) =>
   `X${point.x + 1},Y${point.y + 1},Z${point.z + 1}`;
 
+const formatPathBasename = (value: string | null | undefined) => {
+  if (!value) return "No file path";
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || value;
+};
+
+const normalizeLocalPath = (value: string | null | undefined) =>
+  (value || "")
+    .replace(/^file:\/\//, "")
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+
+const registryAssetLocalPath = (asset: PrivateRegistryAsset) => {
+  const root = normalizeLocalPath(asset.source.root);
+  const relative = normalizeLocalPath(asset.relative_path).replace(/^\//, "");
+  return root ? `${root}/${relative}` : relative;
+};
+
+const registryAssetReviewBlockers = (asset: PrivateRegistryAsset) =>
+  asset.readiness.blockers.filter((blocker) => blocker !== "blocked_permission");
+
+const registryIndexQueueKeys = (asset: PrivateRegistryAsset) => {
+  const keys = new Set<string>();
+  const rawPaths = [asset.relative_path, asset.source.relative_path]
+    .map((path) => normalizeLocalPath(path).replace(/^\//, ""))
+    .filter(Boolean);
+
+  for (const path of rawPaths) {
+    const parts = path.split("/").filter(Boolean);
+    if (parts.length > 1) {
+      const [datasetSlug, ...rest] = parts;
+      const datasetRelativePath = rest.join("/");
+      if (datasetRelativePath) {
+        keys.add(`${datasetSlug}\n${datasetRelativePath}`);
+      }
+      keys.add(`${datasetSlug}\n${path}`);
+    }
+    if (asset.archive_id) {
+      keys.add(`${asset.archive_id}\n${path}`);
+    }
+  }
+
+  return keys;
+};
+
+const buildIndexQueueAssetLookup = (queue: IndexQueueResponse | null) => {
+  const lookup = new Map<string, IndexQueueAssetMatch>();
+  if (!queue) return lookup;
+
+  for (const dataset of queue.datasets) {
+    for (const asset of dataset.assets) {
+      const relativePath = normalizeLocalPath(asset.relative_path).replace(/^\//, "");
+      const match = { dataset, asset };
+      lookup.set(`${dataset.slug}\n${relativePath}`, match);
+      lookup.set(`${dataset.slug}\n${dataset.slug}/${relativePath}`, match);
+    }
+  }
+
+  return lookup;
+};
+
+const buildIndexQueueMatchKeys = (queue: IndexQueueResponse | null) => {
+  if (!queue) return [];
+  const keys = new Set<string>();
+  for (const dataset of queue.datasets) {
+    for (const asset of dataset.assets) {
+      const relativePath = normalizeLocalPath(asset.relative_path).replace(/^\//, "");
+      if (!relativePath) continue;
+      keys.add(`${dataset.slug}\n${relativePath}`);
+      keys.add(`${dataset.slug}\n${dataset.slug}/${relativePath}`);
+    }
+  }
+  return Array.from(keys);
+};
+
+const findRegistryIndexQueueMatch = (
+  asset: PrivateRegistryAsset,
+  lookup: Map<string, IndexQueueAssetMatch>
+) => {
+  for (const key of registryIndexQueueKeys(asset)) {
+    const match = lookup.get(key);
+    if (match) return match;
+  }
+  return null;
+};
+
+const registryAssetSearchText = (asset: PrivateRegistryAsset, searchEntryText = "") =>
+  [
+    searchEntryText,
+    asset.relative_path,
+    asset.name,
+    asset.metadata.format,
+    asset.metadata.dtype,
+    asset.likely_role,
+    asset.status.asset_status,
+    asset.status.triage_status,
+    asset.status.rights_status,
+    asset.review.gap_codes.join(" "),
+    asset.readiness.blockers.join(" "),
+  ]
+    .join(" ")
+    .toLowerCase();
+
 const csvEscape = (value: string | number | null | undefined) => {
   const raw = value == null ? "" : String(value);
   if (!/[",\n\r]/.test(raw)) return raw;
@@ -420,7 +679,284 @@ const downloadBlob = (blob: Blob, filename: string) => {
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+};
+
+const blobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Could not encode PNG export data."));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error("Could not read PNG export data."));
+    reader.readAsDataURL(blob);
+  });
+
+const EXPORT_TEXT_LAYER_SELECTOR =
+  ".viewer-overlay-label, .scale-bar-wrap, .workbench-stage-readout, .stage-load-serial, .stage-overlay.error";
+const EXPORT_BOX_LAYER_SELECTOR =
+  ".viewer-crosshair-line, .scale-bar-line, .viewer-overlay-label, .workbench-stage-readout, .stage-load-serial, .stage-overlay.error";
+
+const cssPixelValue = (value: string) => {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const isTransparentColor = (value: string) =>
+  !value ||
+  value === "transparent" ||
+  value === "rgba(0, 0, 0, 0)" ||
+  value === "rgba(0,0,0,0)";
+
+const isExportElementVisible = (element: HTMLElement | SVGElement) => {
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    cssPixelValue(style.opacity || "1") > 0
+  );
+};
+
+const drawCssBox = (
+  context: CanvasRenderingContext2D,
+  element: HTMLElement,
+  panelRect: DOMRect,
+  scale: number
+) => {
+  if (!isExportElementVisible(element)) return;
+
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  const x = Math.round((rect.left - panelRect.left) * scale);
+  const y = Math.round((rect.top - panelRect.top) * scale);
+  const width = Math.round(rect.width * scale);
+  const height = Math.round(rect.height * scale);
+  if (width <= 0 || height <= 0) return;
+
+  context.save();
+  context.globalAlpha = Math.max(0, Math.min(1, cssPixelValue(style.opacity || "1")));
+
+  if (style.boxShadow && style.boxShadow !== "none") {
+    context.fillStyle = "rgba(0, 0, 0, 0.42)";
+    context.fillRect(x - scale, y - scale, width + 2 * scale, height + 2 * scale);
+  }
+
+  if (!isTransparentColor(style.backgroundColor)) {
+    context.fillStyle = style.backgroundColor;
+    context.fillRect(x, y, width, height);
+  }
+
+  const drawBorder = (side: "Top" | "Right" | "Bottom" | "Left") => {
+    const borderWidth = cssPixelValue(style[`border${side}Width` as keyof CSSStyleDeclaration] as string) * scale;
+    const borderStyle = style[`border${side}Style` as keyof CSSStyleDeclaration] as string;
+    const borderColor = style[`border${side}Color` as keyof CSSStyleDeclaration] as string;
+    if (borderWidth <= 0 || borderStyle === "none" || isTransparentColor(borderColor)) return;
+
+    context.fillStyle = borderColor;
+    if (side === "Top") context.fillRect(x, y, width, borderWidth);
+    if (side === "Right") context.fillRect(x + width - borderWidth, y, borderWidth, height);
+    if (side === "Bottom") context.fillRect(x, y + height - borderWidth, width, borderWidth);
+    if (side === "Left") context.fillRect(x, y, borderWidth, height);
+  };
+
+  drawBorder("Top");
+  drawBorder("Right");
+  drawBorder("Bottom");
+  drawBorder("Left");
+  context.restore();
+};
+
+const canvasFontFromStyle = (style: CSSStyleDeclaration, scale: number) => {
+  const fontSize = Math.max(1, cssPixelValue(style.fontSize) * scale);
+  const fontStyle = style.fontStyle && style.fontStyle !== "normal" ? `${style.fontStyle} ` : "";
+  const fontVariant = style.fontVariant && style.fontVariant !== "normal" ? `${style.fontVariant} ` : "";
+  const fontWeight = style.fontWeight || "400";
+  const fontFamily = style.fontFamily || "Arial, sans-serif";
+  return `${fontStyle}${fontVariant}${fontWeight} ${fontSize}px ${fontFamily}`;
+};
+
+const normalizeTextForTransform = (text: string, style: CSSStyleDeclaration) => {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (style.textTransform === "uppercase") return collapsed.toUpperCase();
+  if (style.textTransform === "lowercase") return collapsed.toLowerCase();
+  return collapsed;
+};
+
+type ClientClipRect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+const intersectClientRect = (a: ClientClipRect, b: ClientClipRect): ClientClipRect | null => {
+  const rect = {
+    left: Math.max(a.left, b.left),
+    top: Math.max(a.top, b.top),
+    right: Math.min(a.right, b.right),
+    bottom: Math.min(a.bottom, b.bottom),
+  };
+  return rect.right > rect.left && rect.bottom > rect.top ? rect : null;
+};
+
+const textNodeClipRect = (root: HTMLElement, parent: HTMLElement): ClientClipRect | null => {
+  const rootRect = root.getBoundingClientRect();
+  let clip: ClientClipRect | null = {
+    left: rootRect.left,
+    top: rootRect.top,
+    right: rootRect.right,
+    bottom: rootRect.bottom,
+  };
+
+  let element: HTMLElement | null = parent;
+  while (element && clip) {
+    const style = window.getComputedStyle(element);
+    const clipsX = style.overflowX !== "visible";
+    const clipsY = style.overflowY !== "visible";
+    if (element === root || clipsX || clipsY) {
+      const rect = element.getBoundingClientRect();
+      clip = intersectClientRect(clip, {
+        left: clipsX || element === root ? rect.left : Number.NEGATIVE_INFINITY,
+        top: clipsY || element === root ? rect.top : Number.NEGATIVE_INFINITY,
+        right: clipsX || element === root ? rect.right : Number.POSITIVE_INFINITY,
+        bottom: clipsY || element === root ? rect.bottom : Number.POSITIVE_INFINITY,
+      });
+    }
+    if (element === root) break;
+    element = element.parentElement;
+  }
+
+  return clip;
+};
+
+const drawTextNodeLayer = (
+  context: CanvasRenderingContext2D,
+  root: HTMLElement,
+  panelRect: DOMRect,
+  scale: number
+) => {
+  if (!isExportElementVisible(root)) return;
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return node.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+
+  const range = document.createRange();
+  let node = walker.nextNode();
+  while (node) {
+    const parent = node.parentElement;
+    if (parent) {
+      const style = window.getComputedStyle(parent);
+      if (style.display !== "none" && style.visibility !== "hidden" && !isTransparentColor(style.color)) {
+        const text = normalizeTextForTransform(node.textContent || "", style);
+        if (text) {
+          range.selectNodeContents(node);
+          const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+          const rect = rects[0];
+          const clipRect = textNodeClipRect(root, parent);
+          if (rect && clipRect && intersectClientRect(clipRect, rect)) {
+            const x = (rect.left - panelRect.left) * scale;
+            const y = (rect.top - panelRect.top) * scale;
+            const clipX = (clipRect.left - panelRect.left) * scale;
+            const clipY = (clipRect.top - panelRect.top) * scale;
+            const clipWidth = (clipRect.right - clipRect.left) * scale;
+            const clipHeight = (clipRect.bottom - clipRect.top) * scale;
+
+            context.save();
+            context.beginPath();
+            context.rect(clipX, clipY, clipWidth, clipHeight);
+            context.clip();
+            context.globalAlpha = Math.max(0, Math.min(1, cssPixelValue(style.opacity || "1")));
+            context.font = canvasFontFromStyle(style, scale);
+            context.fillStyle = style.color;
+            context.textBaseline = "top";
+            if (style.textShadow && style.textShadow !== "none") {
+              context.shadowColor = "rgba(0, 0, 0, 0.82)";
+              context.shadowBlur = 3 * scale;
+              context.shadowOffsetY = scale;
+            }
+            context.fillText(text, x, y);
+            context.restore();
+          }
+        }
+      }
+    }
+    node = walker.nextNode();
+  }
+  range.detach();
+};
+
+const loadImageFromUrl = (url: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not rasterize SVG overlay."));
+    image.src = url;
+  });
+
+const drawSvgLayer = async (
+  context: CanvasRenderingContext2D,
+  svg: SVGSVGElement,
+  panelRect: DOMRect,
+  scale: number
+) => {
+  if (!isExportElementVisible(svg)) return;
+
+  const rect = svg.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width * scale));
+  const height = Math.max(1, Math.round(rect.height * scale));
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+
+  const serialized = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([serialized], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = await loadImageFromUrl(url);
+    context.drawImage(
+      image,
+      Math.round((rect.left - panelRect.left) * scale),
+      Math.round((rect.top - panelRect.top) * scale),
+      width,
+      height
+    );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+};
+
+const drawWorkbenchExportOverlays = async (
+  context: CanvasRenderingContext2D,
+  panel: HTMLElement,
+  panelRect: DOMRect,
+  scale: number
+) => {
+  const crosshairLines = Array.from(panel.querySelectorAll<HTMLElement>(".viewer-crosshair-line"));
+  crosshairLines.forEach((element) => drawCssBox(context, element, panelRect, scale));
+
+  const svgLayers = Array.from(panel.querySelectorAll<SVGSVGElement>(".viewer-annotation-overlay"));
+  for (const svg of svgLayers) {
+    await drawSvgLayer(context, svg, panelRect, scale);
+  }
+
+  const boxLayers = Array.from(panel.querySelectorAll<HTMLElement>(EXPORT_BOX_LAYER_SELECTOR)).filter(
+    (element) => !element.classList.contains("viewer-crosshair-line")
+  );
+  boxLayers.forEach((element) => drawCssBox(context, element, panelRect, scale));
+
+  const textLayers = Array.from(panel.querySelectorAll<HTMLElement>(EXPORT_TEXT_LAYER_SELECTOR));
+  textLayers.forEach((element) => drawTextNodeLayer(context, element, panelRect, scale));
 };
 
 const getDesktopEnv = () =>
@@ -432,20 +968,39 @@ const getAccountApiBaseUrl = () =>
 const getAtlasBaseUrl = () =>
   (getDesktopEnv().VITE_SCION_ATLAS_BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 
-async function volumeJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`http://127.0.0.1:8080${path}`, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(init?.headers || {}),
-    },
-    cache: "no-store",
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || payload?.detail || `${response.status} ${response.statusText}`);
+const formatVolumeRuntimeError = (error: unknown) => {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "Volume engine request timed out.";
   }
-  return payload as T;
+  if (error instanceof TypeError) {
+    return "Volume engine is not reachable at 127.0.0.1:8080.";
+  }
+  return error instanceof Error ? error.message : "Volume engine request failed.";
+};
+
+async function volumeJson<T>(path: string, init?: RequestInit, timeoutMs = 10000): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`http://127.0.0.1:8080${path}`, {
+      ...init,
+      signal: init?.signal || controller.signal,
+      headers: {
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(init?.headers || {}),
+      },
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || payload?.detail || `${response.status} ${response.statusText}`);
+    }
+    return payload as T;
+  } catch (error) {
+    throw new Error(formatVolumeRuntimeError(error));
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 async function accountJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -476,9 +1031,23 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [openingLocal, setOpeningLocal] = useState(false);
   const [localOpenReport, setLocalOpenReport] = useState<CompatibilityReport | null>(null);
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
+  const [projectRecoveryStatus, setProjectRecoveryStatus] = useState<ProjectRecoveryStatus | null>(null);
   const [recentLocalDatasets, setRecentLocalDatasets] = useState<RecentLocalDataset[]>(() =>
     readStoredArray<RecentLocalDataset>(RECENT_LOCAL_DATASETS_STORAGE_KEY)
   );
+  const [recentCaosProjects, setRecentCaosProjects] = useState<RecentCaosProject[]>(() =>
+    readStoredArray<RecentCaosProject>(RECENT_CAOS_PROJECTS_STORAGE_KEY)
+  );
+  const [currentProjectPath, setCurrentProjectPath] = useState<string | null>(null);
+  const [currentProjectId, setCurrentProjectId] = useState(() => `project_${Date.now()}`);
+  const [currentProjectCreatedAt, setCurrentProjectCreatedAt] = useState(() =>
+    new Date().toISOString()
+  );
+  const [currentProjectNotes, setCurrentProjectNotes] = useState<CaosProjectNote[]>([]);
+  const [currentProjectExports, setCurrentProjectExports] = useState<unknown[]>([]);
+  const [savedCaosProjectSignature, setSavedCaosProjectSignature] = useState<string | null>(null);
+  const initialProjectSignatureRef = useRef(false);
+  const restoredLastProjectRef = useRef(false);
   const [savedSessions, setSavedSessions] = useState<WorkbenchSessionSnapshot[]>(() =>
     readStoredArray<WorkbenchSessionSnapshot>(WORKBENCH_SESSIONS_STORAGE_KEY)
   );
@@ -504,6 +1073,8 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [jobs, setJobs] = useState<LocalJobRecord[]>(() =>
     readStoredArray<LocalJobRecord>(WORKBENCH_JOBS_STORAGE_KEY)
   );
+  const caosProjectInputRef = useRef<HTMLInputElement | null>(null);
+  const nativeCommandHandlerRef = useRef<(command: string) => void>(() => {});
   const [indexQueue, setIndexQueue] = useState<IndexQueueResponse | null>(null);
   const [indexQueueLoading, setIndexQueueLoading] = useState(false);
   const [indexQueueError, setIndexQueueError] = useState<string | null>(null);
@@ -511,12 +1082,32 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [indexJobs, setIndexJobs] = useState<IndexJobRecord[]>([]);
   const [indexJobsLoading, setIndexJobsLoading] = useState(false);
   const completedIndexJobIds = useRef<Set<string>>(new Set());
+  const [privateRegistry, setPrivateRegistry] = useState<PrivateArchiveRegistryIndex | null>(null);
+  const [privateRegistrySummary, setPrivateRegistrySummary] = useState<PrivateRegistrySummary | null>(null);
+  const [privateRegistryNativePath, setPrivateRegistryNativePath] = useState<string | null>(null);
+  const [privateRegistryPath, setPrivateRegistryPath] = useState<string | null>(null);
+  const [privateRegistryStatus, setPrivateRegistryStatus] = useState<string | null>(null);
+  const [privateRegistryError, setPrivateRegistryError] = useState<string | null>(null);
+  const [privateRegistryQuery, setPrivateRegistryQuery] = useState("");
+  const [privateRegistryQueueFilter, setPrivateRegistryQueueFilter] = useState<PrivateRegistryQueueFilter>("all");
+  const [privateRegistryProjectPage, setPrivateRegistryProjectPage] = useState<PrivateRegistryAssetPage>(() =>
+    emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready)
+  );
+  const [privateRegistryConversionPage, setPrivateRegistryConversionPage] = useState<PrivateRegistryAssetPage>(() =>
+    emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.conversion_queue)
+  );
+  const [privateRegistryReviewPage, setPrivateRegistryReviewPage] = useState<PrivateRegistryAssetPage>(() =>
+    emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.review)
+  );
   const [accountUser, setAccountUser] = useState<AccountUser | null>(null);
   const [accountDevice, setAccountDevice] = useState<AccountDevice | null>(null);
   const [pairing, setPairing] = useState<DevicePairing | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountStatus, setAccountStatus] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [mirrorMode, setMirrorMode] = useState(() =>
+    readStoredString(WORKBENCH_MIRROR_MODE_STORAGE_KEY) === "true"
+  );
 
   useEffect(() => {
     setLocalDatasets(datasets);
@@ -539,9 +1130,44 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   }, [jobs]);
 
   useEffect(() => {
+    writeStoredString(WORKBENCH_MIRROR_MODE_STORAGE_KEY, mirrorMode ? "true" : "false");
+  }, [mirrorMode]);
+
+  useEffect(() => {
     if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
       setIsTauri(true);
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+
+    let active = true;
+    let unlisten: (() => void) | null = null;
+
+    import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<string>("caos-native-command", (event) => {
+          nativeCommandHandlerRef.current(event.payload);
+        })
+      )
+      .then((cleanup) => {
+        if (active) {
+          unlisten = cleanup;
+        } else {
+          cleanup();
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to register native command listener.", error);
+      });
+
+    return () => {
+      active = false;
+      if (unlisten) {
+        unlisten();
+      }
+    };
   }, []);
 
   const loadAccountDevice = async () => {
@@ -627,16 +1253,16 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   // 3. State values synchronized with URL (with standard defaults)
   const currentDatasetSlug = searchParams.get("dataset") || defaultDataset?.slug || "";
   const currentAssetPath = searchParams.get("asset") || defaultDerivative?.source_relative_path || "";
-  const currentAxis = (searchParams.get("axis") || "z") as "z" | "y" | "x";
-  const currentSlice = Number(searchParams.get("slice") || 0);
-  const currentMinContrast = Number(searchParams.get("minContrast") || 0);
-  const currentMaxContrast = Number(searchParams.get("maxContrast") || 255);
-  const currentColormap = Number(searchParams.get("colormap") || 0);
+  const currentAxis = parseAxisParam(searchParams.get("axis"));
+  const currentSlice = parseNumberParam(searchParams.get("slice"), 0);
+  const currentMinContrast = parseNumberParam(searchParams.get("minContrast"), 0);
+  const currentMaxContrast = parseNumberParam(searchParams.get("maxContrast"), 255);
+  const currentColormap = Math.max(0, Math.min(2, Math.round(parseNumberParam(searchParams.get("colormap"), 0))));
   const currentLogScale = searchParams.get("logScale") === "true";
 
   // Viewer mode and downsample states
-  const currentViewMode = (searchParams.get("viewMode") || "orthogonal") as "orthogonal" | "2d" | "3d";
-  const currentDownsample = Number(searchParams.get("downsample") || 4);
+  const currentViewMode = parseViewModeParam(searchParams.get("viewMode"));
+  const currentDownsample = Math.max(1, Math.round(parseNumberParam(searchParams.get("downsample"), 4)));
 
   // Interactive 3D variables stored locally to avoid Next.js routing freezes during high-frequency drag/scroll actions
   const [localPitch, setLocalPitch] = useState(0.0);
@@ -800,6 +1426,30 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     });
   };
 
+  const findLoadedDerivativeForRegistryAsset = (asset: PrivateRegistryAsset) => {
+    const assetPath = registryAssetLocalPath(asset);
+    for (const dataset of localDatasets) {
+      for (const derivative of dataset.derivatives) {
+        const outputPath = normalizeLocalPath(derivative.output_path);
+        if (outputPath && (outputPath === assetPath || outputPath.endsWith(`/${asset.relative_path}`))) {
+          return { dataset, derivative };
+        }
+      }
+    }
+    return null;
+  };
+
+  const openRegistryProjectReadyAsset = (asset: PrivateRegistryAsset) => {
+    const target = findLoadedDerivativeForRegistryAsset(asset);
+    if (!target) {
+      setPrivateRegistryStatus("Project-ready registry asset is not present in the current Workbench data list.");
+      return;
+    }
+    focusDatasetDerivative(target.dataset.slug, target.derivative);
+    setActiveTab("telemetry");
+    setPrivateRegistryStatus(`Opened ${formatPathBasename(asset.relative_path)} from ${target.dataset.slug}.`);
+  };
+
   const openLocalPath = async (path: string) => {
     if (openingLocal) return;
     try {
@@ -810,17 +1460,13 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         summary: "Scanning local Zarr metadata and compatibility checks.",
       });
 
-      const response = await fetch(`http://127.0.0.1:8080/api/volume/open-local?path=${encodeURIComponent(path)}`);
-      const result = await response.json().catch(() => ({
-        success: false,
-        error: `Local data runtime returned ${response.status}.`,
-      })) as OpenLocalResponse;
+      const result = await volumeJson<OpenLocalResponse>(
+        `/api/volume/open-local?path=${encodeURIComponent(path)}`,
+        undefined,
+        15000
+      );
       if (result.success && result.slug) {
-        const freshResponse = await fetch("http://127.0.0.1:8080/api/volume/workbench-data");
-        if (!freshResponse.ok) {
-          throw new Error(`Local data opened, but workbench data refresh returned ${freshResponse.status}.`);
-        }
-        const freshData = await freshResponse.json() as PackagedDataset[];
+        const freshData = await volumeJson<PackagedDataset[]>("/api/volume/workbench-data");
         setLocalDatasets(freshData);
 
         const targetDataset = freshData.find((d) => d.slug === result.slug);
@@ -996,6 +1642,11 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       null
     );
   }, [activeDataset, currentAssetPath]);
+  const activeVolumeKey =
+    activeDataset && activeDerivative
+      ? `${activeDataset.slug}::${activeDerivative.source_relative_path}`
+      : "";
+  const lastActiveVolumeKeyRef = useRef(activeVolumeKey);
   const activeVolumeFileCount = activeDataset?.derivatives.length || 0;
 
   // Voxel shapes: Z, Y, X
@@ -1022,6 +1673,28 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     setOrthogonalCommitted(next);
   }, [currentDatasetSlug, currentAssetPath, currentXSlice, currentYSlice, currentZSlice, xMax, yMax, zMax]);
 
+  useEffect(() => {
+    if (lastActiveVolumeKeyRef.current === activeVolumeKey) return;
+    lastActiveVolumeKeyRef.current = activeVolumeKey;
+
+    setMeasurementDraft(null);
+    setSelectedMeasurementId(null);
+    setRoiDraft(null);
+    setSelectedRoiId(null);
+    setActiveProbe(null);
+    setHistogramData(new Array(256).fill(0));
+    viewerLoadingSources.current = {};
+    setViewerStreaming(false);
+    setMeasurementStatus(measurementMode ? "Click a start point on any 2D plane." : "Measurement mode off.");
+    setRoiStatus(
+      roiTool === "point"
+        ? "Point ROI tool active. Click a 2D plane."
+        : roiTool === "box"
+        ? "Box ROI tool active. Click two corners on the same 2D plane."
+        : "ROI tool off."
+    );
+  }, [activeVolumeKey, measurementMode, roiTool]);
+
   const orthogonalQueued =
     orthogonalDraft.x !== orthogonalCommitted.x ||
     orthogonalDraft.y !== orthogonalCommitted.y ||
@@ -1033,10 +1706,11 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     if (currentAxis === "y") return yMax;
     return xMax;
   }, [currentAxis, zMax, yMax, xMax]);
+  const currentClampedSlice = clampIndex(currentSlice, maxSlicesForAxis);
 
   // Keep state updated in case parameters go out of bounds
   useEffect(() => {
-    if (currentSlice >= maxSlicesForAxis) {
+    if (currentSlice < 0 || currentSlice >= maxSlicesForAxis) {
       updateUrlParams({ slice: Math.max(0, maxSlicesForAxis - 1) });
     }
   }, [currentSlice, maxSlicesForAxis]);
@@ -1229,6 +1903,63 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     if (!activeIndexQueueDataset) return 0;
     return activeIndexQueueDataset.assets.filter((asset) => Boolean(asset.convert_command)).length;
   }, [activeIndexQueueDataset]);
+  const indexQueueAssetLookup = useMemo(() => buildIndexQueueAssetLookup(indexQueue), [indexQueue]);
+  const indexQueueMatchKeys = useMemo(() => buildIndexQueueMatchKeys(indexQueue), [indexQueue]);
+  const activePrivateRegistrySummary = privateRegistrySummary || privateRegistry?.summary || null;
+  const privateRegistryUsesNativeIndex = Boolean(privateRegistryNativePath);
+  const privateRegistrySearchTextByAssetId = useMemo(() => {
+    const lookup = new Map<string, string>();
+    if (!privateRegistry) return lookup;
+    for (const entry of privateRegistry.searchEntries) {
+      lookup.set(entry.asset_id, `${entry.search_text} ${entry.title} ${entry.format}`.toLowerCase());
+    }
+    return lookup;
+  }, [privateRegistry]);
+  const privateRegistryQueryTokens = useMemo(
+    () => privateRegistryQuery.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [privateRegistryQuery]
+  );
+  const privateRegistryAssetMatchesQuery = (asset: PrivateRegistryAsset) => {
+    if (privateRegistryQueryTokens.length === 0) return true;
+    const searchText = registryAssetSearchText(
+      asset,
+      privateRegistrySearchTextByAssetId.get(asset.asset_id) || ""
+    );
+    return privateRegistryQueryTokens.every((token) => searchText.includes(token));
+  };
+  const findIndexQueueAssetForRegistryAsset = (asset: PrivateRegistryAsset) =>
+    findRegistryIndexQueueMatch(asset, indexQueueAssetLookup);
+  const privateRegistryFilteredProjectReadyAssets = useMemo(() => {
+    if (privateRegistryUsesNativeIndex) return privateRegistryProjectPage.assets;
+    if (!privateRegistry) return [];
+    return privateRegistry.projectReadyAssets.filter(privateRegistryAssetMatchesQuery);
+  }, [privateRegistryUsesNativeIndex, privateRegistryProjectPage.assets, privateRegistry, privateRegistryQueryTokens, privateRegistrySearchTextByAssetId]);
+  const privateRegistryFilteredConversionQueueAssets = useMemo(() => {
+    if (privateRegistryUsesNativeIndex) return privateRegistryConversionPage.assets;
+    if (!privateRegistry) return [];
+    return privateRegistry.conversionQueueAssets.filter((asset) => {
+      if (!privateRegistryAssetMatchesQuery(asset)) return false;
+      const reviewBlockers = registryAssetReviewBlockers(asset);
+      if (privateRegistryQueueFilter === "ready") return reviewBlockers.length === 0;
+      if (privateRegistryQueueFilter === "review") return reviewBlockers.length > 0 || asset.status.review_required;
+      if (privateRegistryQueueFilter === "matched") return Boolean(findIndexQueueAssetForRegistryAsset(asset));
+      return true;
+    });
+  }, [privateRegistryUsesNativeIndex, privateRegistryConversionPage.assets, privateRegistry, privateRegistryQueryTokens, privateRegistrySearchTextByAssetId, privateRegistryQueueFilter, indexQueueAssetLookup]);
+  const privateRegistryFilteredReviewAssets = useMemo(() => {
+    if (privateRegistryUsesNativeIndex) return privateRegistryReviewPage.assets;
+    if (!privateRegistry) return [];
+    return privateRegistry.reviewAssets.filter(privateRegistryAssetMatchesQuery);
+  }, [privateRegistryUsesNativeIndex, privateRegistryReviewPage.assets, privateRegistry, privateRegistryQueryTokens, privateRegistrySearchTextByAssetId]);
+  const privateRegistryProjectReadyTotal = privateRegistryUsesNativeIndex
+    ? privateRegistryProjectPage.totalCount
+    : privateRegistryFilteredProjectReadyAssets.length;
+  const privateRegistryConversionQueueTotal = privateRegistryUsesNativeIndex
+    ? privateRegistryConversionPage.totalCount
+    : privateRegistryFilteredConversionQueueAssets.length;
+  const privateRegistryReviewTotal = privateRegistryUsesNativeIndex
+    ? privateRegistryReviewPage.totalCount
+    : privateRegistryFilteredReviewAssets.length;
   const visibleIndexJobs = useMemo(() => indexJobs.slice(0, 6), [indexJobs]);
   const findIndexJob = (kind: "convert" | "slices", datasetSlug: string, assetPath: string) =>
     indexJobs.find(
@@ -1278,7 +2009,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       sourcePath: activeDerivative.source_local_path || activeDerivative.output_path,
       viewMode: currentViewMode,
       axis: currentAxis,
-      slice: clampIndex(currentSlice, maxSlicesForAxis),
+      slice: currentClampedSlice,
       xSlice: currentXSlice,
       ySlice: currentYSlice,
       zSlice: currentZSlice,
@@ -1792,7 +2523,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       result: {
         viewMode: currentViewMode,
         axis: currentAxis,
-        slice: currentSlice + 1,
+        slice: currentClampedSlice + 1,
         totalSamples: total,
         peakBin: maxBin.index,
         peakCount: maxBin.count,
@@ -1825,12 +2556,192 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           ? `Scanned ${payload.summary.assets} assets across ${payload.summary.datasets} datasets.`
           : `Public data root not found: ${payload.root}`
       );
+      return payload;
     } catch (error) {
       setIndexQueueError(error instanceof Error ? error.message : "Index queue scan failed.");
+      return null;
     } finally {
       setIndexQueueLoading(false);
     }
   };
+
+  const setPrivateRegistryPage = (
+    section: PrivateRegistryIndexSection,
+    updater: (previous: PrivateRegistryAssetPage) => PrivateRegistryAssetPage
+  ) => {
+    if (section === "project_ready") {
+      setPrivateRegistryProjectPage(updater);
+    } else if (section === "conversion_queue") {
+      setPrivateRegistryConversionPage(updater);
+    } else {
+      setPrivateRegistryReviewPage(updater);
+    }
+  };
+
+  const queryPrivateRegistryNativePage = async (
+    registryPath: string,
+    section: PrivateRegistryIndexSection,
+    options?: {
+      query?: string;
+      queueFilter?: PrivateRegistryQueueFilter;
+      offset?: number;
+      silent?: boolean;
+    }
+  ) => {
+    const limit = PRIVATE_REGISTRY_PAGE_LIMITS[section];
+    const query = options?.query ?? privateRegistryQuery;
+    const queueFilter = section === "conversion_queue" ? (options?.queueFilter ?? privateRegistryQueueFilter) : "all";
+    const offset = Math.max(0, options?.offset ?? 0);
+    if (!options?.silent) {
+      setPrivateRegistryPage(section, (previous) => ({ ...previous, loading: true, error: null }));
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const payload = await invoke<NativePrivateRegistryIndexQueryResult>("query_private_registry_index", {
+        request: {
+          registryPath,
+          section,
+          query,
+          queueFilter,
+          offset,
+          limit,
+          matchedKeys: queueFilter === "matched" ? indexQueueMatchKeys : undefined,
+        } satisfies NativePrivateRegistryIndexQuery,
+      });
+      const assets = payload.assetsContents.trim()
+        ? parsePrivateRegistryAssetsJsonl(payload.assetsContents)
+        : [];
+      setPrivateRegistryPage(section, () => ({
+        assets,
+        totalCount: payload.totalCount,
+        offset: payload.offset,
+        limit: payload.limit,
+        loading: false,
+        error: null,
+      }));
+      return payload;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Could not query ${section} registry page.`;
+      setPrivateRegistryPage(section, (previous) => ({ ...previous, loading: false, error: message }));
+      if (!options?.silent) {
+        setPrivateRegistryError(message);
+      }
+      return null;
+    }
+  };
+
+  const refreshPrivateRegistryNativePages = async (
+    registryPath = privateRegistryNativePath,
+    options?: { query?: string; queueFilter?: PrivateRegistryQueueFilter; silent?: boolean }
+  ) => {
+    if (!registryPath) return;
+    await Promise.all([
+      queryPrivateRegistryNativePage(registryPath, "project_ready", options),
+      queryPrivateRegistryNativePage(registryPath, "conversion_queue", options),
+      queryPrivateRegistryNativePage(registryPath, "review", options),
+    ]);
+  };
+
+  const openPrivateRegistryNative = async () => {
+    if (!isTauri) {
+      setPrivateRegistryError("Private registry import is available in the desktop Workbench.");
+      return;
+    }
+    setPrivateRegistryError(null);
+    setPrivateRegistryStatus("Opening private registry...");
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const file = await invoke<NativePrivateRegistryIndexFile | null>("open_private_registry_index_file");
+      if (!file) {
+        setPrivateRegistryStatus(null);
+        return;
+      }
+      const summary = parsePrivateRegistrySummary(file.summaryContents);
+      setPrivateRegistry(null);
+      setPrivateRegistrySummary(summary);
+      setPrivateRegistryNativePath(file.path);
+      setPrivateRegistryPath(file.path);
+      setPrivateRegistryQuery("");
+      setPrivateRegistryQueueFilter("all");
+      setPrivateRegistryStatus(
+        `Loaded ${summary.asset_count} registry assets from ${summary.registry_id}. Showing bounded pages.`
+      );
+      setActiveTab("jobs");
+      await refreshPrivateRegistryNativePages(file.path, { query: "", queueFilter: "all" });
+    } catch (error) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const file = await invoke<NativePrivateRegistryFile | null>("open_private_registry_file");
+        if (!file) {
+          setPrivateRegistryStatus(null);
+          return;
+        }
+        const parsed = parsePrivateArchiveRegistryBundle({
+          summaryContents: file.summaryContents,
+          assetsContents: file.assetsContents,
+          searchContents: file.searchContents,
+        });
+        setPrivateRegistry(parsed);
+        setPrivateRegistrySummary(parsed.summary);
+        setPrivateRegistryNativePath(null);
+        setPrivateRegistryPath(file.path);
+        setPrivateRegistryQuery("");
+        setPrivateRegistryQueueFilter("all");
+        setPrivateRegistryStatus(
+          `Loaded ${parsed.summary.asset_count} registry assets from ${parsed.summary.registry_id}.`
+        );
+        setActiveTab("jobs");
+      } catch (fallbackError) {
+        setPrivateRegistryError(fallbackError instanceof Error ? fallbackError.message : error instanceof Error ? error.message : "Private registry import failed.");
+        setPrivateRegistryStatus(null);
+      }
+    }
+  };
+
+  const renderPrivateRegistryPager = (section: PrivateRegistryIndexSection, page: PrivateRegistryAssetPage) => {
+    if (!privateRegistryNativePath || page.totalCount <= page.limit) return null;
+    const start = page.totalCount === 0 ? 0 : page.offset + 1;
+    const end = Math.min(page.totalCount, page.offset + page.assets.length);
+    const previousOffset = Math.max(0, page.offset - page.limit);
+    const nextOffset = page.offset + page.limit;
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 6, alignItems: "center" }}>
+        <button
+          type="button"
+          className="button"
+          disabled={page.loading || page.offset === 0}
+          onClick={() => queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: previousOffset })}
+          style={{ padding: "4px 6px", fontSize: 9 }}
+        >
+          Prev
+        </button>
+        <span className="muted" style={{ textAlign: "center", fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+          {page.loading ? "Loading" : `${start}-${end} / ${page.totalCount}`}
+        </span>
+        <button
+          type="button"
+          className="button"
+          disabled={page.loading || nextOffset >= page.totalCount}
+          onClick={() => queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: nextOffset })}
+          style={{ padding: "4px 6px", fontSize: 9 }}
+        >
+          Next
+        </button>
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (!privateRegistryNativePath) return;
+    const handle = window.setTimeout(() => {
+      void refreshPrivateRegistryNativePages(privateRegistryNativePath, {
+        query: privateRegistryQuery,
+        queueFilter: privateRegistryQueueFilter,
+        silent: true,
+      });
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [privateRegistryNativePath, privateRegistryQuery, privateRegistryQueueFilter, indexQueueMatchKeys]);
 
   const refreshWorkbenchData = async () => {
     setIndexQueueLoading(true);
@@ -1899,6 +2810,27 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     } finally {
       setIndexJobsLoading(false);
     }
+  };
+
+  const startRegistryConversionAsset = async (asset: PrivateRegistryAsset) => {
+    setActiveTab("jobs");
+    let match = findIndexQueueAssetForRegistryAsset(asset);
+    if (!match) {
+      setIndexQueueStatus(`Scanning index queue for ${asset.relative_path}.`);
+      const freshQueue = await loadIndexQueue();
+      match = freshQueue
+        ? findRegistryIndexQueueMatch(asset, buildIndexQueueAssetLookup(freshQueue))
+        : null;
+    }
+    if (!match) {
+      setIndexQueueStatus(`No sidecar conversion match for ${asset.relative_path}.`);
+      return;
+    }
+    if (!match.asset.convert_command) {
+      setIndexQueueStatus(`${asset.relative_path} is present in the index queue but has no conversion command.`);
+      return;
+    }
+    await startIndexJob("convert", match.dataset, match.asset);
   };
 
   const startNextActiveConversion = async () => {
@@ -2006,13 +2938,13 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           chunks_zyx: activeDerivative.chunks_zyx,
           byte_size: activeDerivative.byte_size,
           physical_voxel_size_nm: activeDerivative.physical_voxel_size_nm,
-          validation: activeDerivative.validation,
+          validation: activeDerivative.validation || null,
         }
       : null,
     view: {
       mode: currentViewMode,
       axis: currentAxis,
-      slice: clampIndex(currentSlice, maxSlicesForAxis),
+      slice: currentClampedSlice,
       xSlice: currentXSlice,
       ySlice: currentYSlice,
       zSlice: currentZSlice,
@@ -2032,7 +2964,115 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     note: sessionNote,
   });
 
-  const exportCurrentViewPng = () => {
+  const currentCaosViewState = (): CaosViewState => ({
+    mode: currentViewMode,
+    axis: currentAxis,
+    slice: currentClampedSlice,
+    xSlice: currentXSlice,
+    ySlice: currentYSlice,
+    zSlice: currentZSlice,
+    minContrast: currentMinContrast,
+    maxContrast: currentMaxContrast,
+    colormap: currentColormap,
+    logScale: currentLogScale,
+    downsample: currentDownsample,
+    pitch: localPitch,
+    yaw: localYaw,
+    alphaScale: localAlphaScale,
+  });
+
+  const currentCaosProjectSnapshot = useMemo(() => {
+    if (!activeDataset || !activeDerivative) return null;
+    try {
+      return buildCaosProjectSnapshot({
+        projectName: sessionName.trim() || defaultSessionName,
+        projectNote: sessionNote,
+        dataset: activeDataset,
+        derivative: activeDerivative,
+        view: {
+          mode: currentViewMode,
+          axis: currentAxis,
+          slice: currentClampedSlice,
+          xSlice: currentXSlice,
+          ySlice: currentYSlice,
+          zSlice: currentZSlice,
+          minContrast: currentMinContrast,
+          maxContrast: currentMaxContrast,
+          colormap: currentColormap,
+          logScale: currentLogScale,
+          downsample: currentDownsample,
+          pitch: localPitch,
+          yaw: localYaw,
+          alphaScale: localAlphaScale,
+        },
+        notes: currentProjectNotes,
+        measurements: activeMeasurements,
+        rois: activeRois,
+        jobs: activeJobs,
+        exports: currentProjectExports,
+        existingProjectId: currentProjectId,
+        createdAt: currentProjectCreatedAt,
+      });
+    } catch {
+      return null;
+    }
+  }, [
+    activeDataset,
+    activeDerivative,
+    sessionName,
+    defaultSessionName,
+    sessionNote,
+    currentViewMode,
+    currentAxis,
+    currentSlice,
+    maxSlicesForAxis,
+    currentXSlice,
+    currentYSlice,
+    currentZSlice,
+    currentMinContrast,
+    currentMaxContrast,
+    currentColormap,
+    currentLogScale,
+    currentDownsample,
+    localPitch,
+    localYaw,
+    localAlphaScale,
+    activeMeasurements,
+    activeRois,
+    activeJobs,
+    currentProjectNotes,
+    currentProjectExports,
+    currentProjectId,
+    currentProjectCreatedAt,
+  ]);
+
+  const currentCaosProjectSignature = useMemo(
+    () => (currentCaosProjectSnapshot ? caosProjectStableSignature(currentCaosProjectSnapshot) : ""),
+    [currentCaosProjectSnapshot]
+  );
+  const currentProjectDirty =
+    Boolean(savedCaosProjectSignature && currentCaosProjectSignature) &&
+    savedCaosProjectSignature !== currentCaosProjectSignature;
+  const currentProjectDisplayName =
+    currentCaosProjectSnapshot?.project.name || sessionName.trim() || defaultSessionName;
+  const currentProjectSaveState = !currentProjectPath
+    ? "Unsaved"
+    : currentProjectDirty
+    ? "Modified"
+    : "Saved";
+  const currentProjectSaveStateColor = !currentProjectPath
+    ? "var(--accent-foreground)"
+    : currentProjectDirty
+    ? "var(--atlas-orange)"
+    : "var(--atlas-blue-dark)";
+
+  useEffect(() => {
+    if (initialProjectSignatureRef.current || !currentCaosProjectSignature) return;
+    initialProjectSignatureRef.current = true;
+    setSavedCaosProjectSignature(currentCaosProjectSignature);
+  }, [currentCaosProjectSignature]);
+
+  const exportCurrentViewPng = async () => {
     const panel = document.querySelector<HTMLElement>(".cockpit-panel-center");
     const canvases = Array.from(panel?.querySelectorAll<HTMLCanvasElement>("canvas") || []);
     if (!panel || canvases.length === 0) {
@@ -2067,6 +3107,13 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       }
     }
 
+    try {
+      await drawWorkbenchExportOverlays(context, panel, panelRect, scale);
+    } catch (error) {
+      console.error("Workbench overlay export failed:", error);
+      setSessionStatus("Exported view canvases, but one overlay layer could not be composited.");
+    }
+
     const name = sanitizeFileSegment(activeDataset?.slug || "workbench-view");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     output.toBlob((blob) => {
@@ -2074,12 +3121,34 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         setSessionStatus("Could not export current view PNG.");
         return;
       }
-      downloadBlob(blob, `${name}-${stamp}.png`);
-      const metadataBlob = new Blob([JSON.stringify(currentViewMetadata(), null, 2)], {
-        type: "application/json",
-      });
-      downloadBlob(metadataBlob, `${name}-${stamp}.view.json`);
-      setSessionStatus("Exported current view PNG and metadata JSON.");
+      void (async () => {
+        const pngFilename = `${name}-${stamp}.png`;
+        const metadataText = JSON.stringify(currentViewMetadata(), null, 2);
+        if (isTauri) {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const saved = await invoke<NativeSavedViewSnapshotFiles>("save_view_snapshot_files", {
+              request: {
+                defaultFilename: pngFilename,
+                pngDataUrl: await blobToDataUrl(blob),
+                metadata: metadataText,
+              },
+            });
+            setSessionStatus(
+              `Exported current view PNG and metadata JSON to ${formatPathBasename(saved.pngPath)}.`
+            );
+            return;
+          } catch (error) {
+            console.error("Native view export failed:", error);
+            setSessionStatus(error instanceof Error ? error.message : "Native view export failed.");
+          }
+        }
+        downloadBlob(blob, pngFilename);
+        downloadBlob(new Blob([metadataText], { type: "application/json" }), `${name}-${stamp}.view.json`);
+        if (!isTauri) {
+          setSessionStatus("Exported current view PNG and metadata JSON.");
+        }
+      })();
     }, "image/png");
   };
 
@@ -2090,6 +3159,12 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     } catch {
       setSessionStatus("Could not copy coordinate link.");
     }
+  };
+
+  const openJobsPanel = () => {
+    setActiveTab("jobs");
+    void loadIndexQueue();
+    void loadIndexJobs({ silent: true });
   };
 
   const applyScoutPreset = (preset: "dense" | "context" | "boundary") => {
@@ -2143,7 +3218,23 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       recentLocalDatasets,
       savedSessions,
       importStatus,
+      projectRecoveryStatus,
       localOpenReport,
+      privateRegistry: activePrivateRegistrySummary
+        ? {
+            path: privateRegistryPath,
+            summary: activePrivateRegistrySummary,
+            mode: privateRegistryNativePath ? "native-index" : "bundle",
+            reviewAssets: privateRegistryFilteredReviewAssets.slice(0, 200).map((asset) => ({
+              asset_id: asset.asset_id,
+              relative_path: asset.relative_path,
+              status: asset.status,
+              readiness: asset.readiness,
+              metadata: asset.metadata,
+              review: asset.review,
+            })),
+          }
+        : null,
     };
     const name = sanitizeFileSegment(activeDataset?.slug || "workbench-project");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2152,6 +3243,329 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       `${name}-${stamp}.workbench.json`
     );
     setSessionStatus("Exported Workbench project bundle.");
+  };
+
+  const rememberRecentCaosProject = (snapshot: CaosProjectSnapshot, path: string | null) => {
+    if (!path) {
+      removeStoredValue(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+      return;
+    }
+
+    const recentEntry: RecentCaosProject = {
+      path,
+      name: snapshot.project.name,
+      projectId: snapshot.project.id,
+      datasetSlug: snapshot.active.datasetSlug,
+      assetPath: snapshot.active.assetPath,
+      updatedAt: snapshot.project.updatedAt,
+      lastOpenedAt: new Date().toISOString(),
+    };
+
+    setRecentCaosProjects((previous) => {
+      const next = [
+        recentEntry,
+        ...previous.filter((item) => item.path !== recentEntry.path),
+      ].slice(0, MAX_RECENT_CAOS_PROJECTS);
+      writeStoredArray(RECENT_CAOS_PROJECTS_STORAGE_KEY, next);
+      return next;
+    });
+    writeStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY, path);
+  };
+
+  const applyCaosProjectSnapshot = (
+    snapshot: CaosProjectSnapshot,
+    path: string | null,
+    actionLabel: "Opened" | "Imported" | "Restored"
+  ) => {
+    const activeVolume = resolveCaosProjectActiveVolume(snapshot, localDatasets);
+    if (activeVolume.status === "missing-volume") {
+      setProjectRecoveryStatus({
+        kind: "warning",
+        path: path || undefined,
+        summary: activeVolume.summary,
+        action: isTauri ? "open-local-folder" : undefined,
+      });
+      setSessionStatus(`${actionLabel} "${snapshot.project.name}" was not applied because its active volume is not loaded.`);
+      if (actionLabel === "Restored" && path && readStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY) === path) {
+        removeStoredValue(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+      }
+      return;
+    }
+    if (activeVolume.status === "fingerprint-mismatch") {
+      setProjectRecoveryStatus({
+        kind: "warning",
+        path: path || undefined,
+        summary: activeVolume.summary,
+        action: isTauri ? "open-local-folder" : undefined,
+      });
+      setSessionStatus(`${actionLabel} "${snapshot.project.name}" was not applied because its active volume has changed.`);
+      if (actionLabel === "Restored" && path && readStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY) === path) {
+        removeStoredValue(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+      }
+      return;
+    }
+
+    setCurrentProjectPath(path);
+    setCurrentProjectId(snapshot.project.id);
+    setCurrentProjectCreatedAt(snapshot.project.createdAt);
+    setCurrentProjectNotes(snapshot.notes);
+    setCurrentProjectExports(snapshot.exports);
+    setProjectRecoveryStatus(null);
+    setSavedCaosProjectSignature(caosProjectStableSignature(snapshot));
+    initialProjectSignatureRef.current = true;
+    setSessionName(snapshot.project.name);
+    setSessionNote(snapshot.notes.find((note) => note.scope === "project")?.text || "");
+    rememberRecentCaosProject(snapshot, path);
+    setMeasurements((previous) =>
+      replaceVolumeScopedRecords(previous, snapshot.measurements, snapshot.volumes, MAX_WORKBENCH_MEASUREMENTS)
+    );
+    setRois((previous) =>
+      replaceVolumeScopedRecords(previous, snapshot.rois, snapshot.volumes, MAX_WORKBENCH_ROIS)
+    );
+    setJobs((previous) =>
+      replaceVolumeScopedRecords(previous, snapshot.jobs, snapshot.volumes, MAX_WORKBENCH_JOBS)
+    );
+    setMeasurementDraft(null);
+    setSelectedMeasurementId(null);
+    setRoiDraft(null);
+    setSelectedRoiId(null);
+    setActiveProbe(null);
+
+    const view = snapshot.active.view;
+    updateUrlParams({
+      dataset: snapshot.active.datasetSlug,
+      asset: snapshot.active.assetPath,
+      viewMode: view.mode,
+      axis: view.axis,
+      slice: view.slice,
+      xSlice: view.xSlice,
+      ySlice: view.ySlice,
+      zSlice: view.zSlice,
+      minContrast: view.minContrast,
+      maxContrast: view.maxContrast,
+      colormap: view.colormap,
+      logScale: view.logScale,
+      downsample: view.downsample,
+      pitch: view.pitch.toFixed(3),
+      yaw: view.yaw.toFixed(3),
+      alphaScale: view.alphaScale.toFixed(3),
+    });
+    setLocalPitch(view.pitch);
+    setLocalYaw(view.yaw);
+    setLocalAlphaScale(view.alphaScale);
+    setImportStatus(null);
+    setSessionStatus(`${actionLabel} CAOS project "${snapshot.project.name}".`);
+  };
+
+  const confirmDiscardProjectChanges = async () => {
+    if (!currentProjectDirty) return true;
+    if (!isTauri) {
+      return window.confirm(`${currentProjectDisplayName} has unsaved changes. Discard them and continue?`);
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<boolean>("confirm_discard_project_changes", {
+        projectName: currentProjectDisplayName,
+      });
+    } catch {
+      return false;
+    }
+  };
+
+  const openCaosProjectPath = async (
+    path: string,
+    options: { skipDirtyCheck?: boolean; actionLabel?: "Opened" | "Restored" } = {}
+  ) => {
+    if (!options.skipDirtyCheck && !(await confirmDiscardProjectChanges())) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const file = await invoke<NativeCaosProjectFile>("read_caos_project_file", { path });
+      const snapshot = parseCaosProjectSnapshot(file.contents);
+      applyCaosProjectSnapshot(snapshot, file.path, options.actionLabel || "Opened");
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : "Could not open CAOS project file.";
+      setProjectRecoveryStatus({
+        kind: "error",
+        path,
+        summary,
+        action: "retry-project-open",
+        actionPath: path,
+      });
+      setSessionStatus(summary);
+      setRecentCaosProjects((previous) => {
+        const next = previous.filter((item) => item.path !== path);
+        writeStoredArray(RECENT_CAOS_PROJECTS_STORAGE_KEY, next);
+        return next;
+      });
+      if (readStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY) === path) {
+        removeStoredValue(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+      }
+    }
+  };
+
+  const openCaosProjectNative = async () => {
+    if (!(await confirmDiscardProjectChanges())) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const file = await invoke<NativeCaosProjectFile | null>("open_caos_project_file");
+      if (!file) return;
+      const snapshot = parseCaosProjectSnapshot(file.contents);
+      applyCaosProjectSnapshot(snapshot, file.path, "Opened");
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : "Could not open CAOS project file.";
+      setProjectRecoveryStatus({ kind: "error", summary });
+      setSessionStatus(summary);
+    }
+  };
+
+  const saveCaosProjectNative = async (forceDialog: boolean) => {
+    if (!currentCaosProjectSnapshot) {
+      setSessionStatus("No active volume is available for CAOS project save.");
+      return;
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const contents = serializeCaosProjectSnapshot(currentCaosProjectSnapshot);
+      const saved = await invoke<NativeSavedCaosProjectFile | null>("save_caos_project_file", {
+        request: {
+          path: currentProjectPath,
+          contents,
+          defaultFilename: `${sanitizeFileSegment(currentCaosProjectSnapshot.project.name)}.caos-project.json`,
+          forceDialog,
+        },
+      });
+      if (!saved) return;
+      setCurrentProjectPath(saved.path);
+      setSavedCaosProjectSignature(caosProjectStableSignature(currentCaosProjectSnapshot));
+      rememberRecentCaosProject(currentCaosProjectSnapshot, saved.path);
+      setSessionStatus(`Saved CAOS project "${currentCaosProjectSnapshot.project.name}".`);
+    } catch (error) {
+      setSessionStatus(error instanceof Error ? error.message : "CAOS project save failed.");
+    }
+  };
+
+  const downloadCaosProject = () => {
+    if (!currentCaosProjectSnapshot) {
+      setSessionStatus("No active volume is available for CAOS project export.");
+      return;
+    }
+
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadBlob(
+        new Blob([serializeCaosProjectSnapshot(currentCaosProjectSnapshot)], { type: "application/json" }),
+        `${sanitizeFileSegment(currentCaosProjectSnapshot.project.name)}-${stamp}.caos-project.json`
+      );
+      setSavedCaosProjectSignature(caosProjectStableSignature(currentCaosProjectSnapshot));
+      setSessionStatus("Exported CAOS project file.");
+    } catch (error) {
+      setSessionStatus(error instanceof Error ? error.message : "CAOS project export failed.");
+    }
+  };
+
+  const importCaosProject = async (file: File | null) => {
+    if (!file) return;
+    if (!(await confirmDiscardProjectChanges())) {
+      if (caosProjectInputRef.current) {
+        caosProjectInputRef.current.value = "";
+      }
+      return;
+    }
+    try {
+      const snapshot = parseCaosProjectSnapshot(await file.text());
+      applyCaosProjectSnapshot(snapshot, null, "Imported");
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : "CAOS project import failed.";
+      setProjectRecoveryStatus({ kind: "error", summary });
+      setSessionStatus(summary);
+    } finally {
+      if (caosProjectInputRef.current) {
+        caosProjectInputRef.current.value = "";
+      }
+    }
+  };
+
+  const forgetProjectRecoveryPath = () => {
+    const path = projectRecoveryStatus?.path;
+    if (path) {
+      setRecentCaosProjects((previous) => {
+        const next = previous.filter((item) => item.path !== path);
+        writeStoredArray(RECENT_CAOS_PROJECTS_STORAGE_KEY, next);
+        return next;
+      });
+      if (readStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY) === path) {
+        removeStoredValue(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+      }
+    }
+    setProjectRecoveryStatus(null);
+    setSessionStatus("Project recovery status cleared.");
+  };
+
+  useEffect(() => {
+    if (!isTauri || restoredLastProjectRef.current) return;
+    const lastPath = readStoredString(LAST_CAOS_PROJECT_PATH_STORAGE_KEY);
+    if (!lastPath) return;
+    restoredLastProjectRef.current = true;
+    void openCaosProjectPath(lastPath, { skipDirtyCheck: true, actionLabel: "Restored" });
+  }, [isTauri]);
+
+  nativeCommandHandlerRef.current = (command: string) => {
+    switch (command) {
+      case "open-local":
+        void handleOpenLocalDirectory();
+        break;
+      case "copy-link":
+        void copyCoordinateLink();
+        break;
+      case "toggle-mirror":
+        setMirrorMode((current) => !current);
+        break;
+      case "toggle-measure":
+        toggleMeasurementMode();
+        break;
+      case "roi-point":
+        toggleRoiTool("point");
+        break;
+      case "roi-box":
+        toggleRoiTool("box");
+        break;
+      case "run-jobs":
+        openJobsPanel();
+        break;
+      case "open-private-registry":
+        void openPrivateRegistryNative();
+        break;
+      case "show-notes":
+        setActiveTab("image-notes");
+        break;
+      case "open-caos":
+        void openCaosProjectNative();
+        break;
+      case "save-caos":
+        void saveCaosProjectNative(false);
+        break;
+      case "save-caos-as":
+        void saveCaosProjectNative(true);
+        break;
+      case "save-view":
+        saveCurrentSession();
+        break;
+      case "export-view":
+        exportCurrentViewPng();
+        break;
+      case "export-bundle":
+        exportProjectBundle();
+        break;
+      case "export-caos":
+        downloadCaosProject();
+        break;
+      case "import-caos":
+        setActiveTab("image-notes");
+        caosProjectInputRef.current?.click();
+        break;
+      default:
+        break;
+    }
   };
 
   return (
@@ -2198,81 +3612,77 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           </select>
         </label>
 
-        <div className="topbar-actions" aria-label="Operating system actions">
-          <button
-            type="button"
-            onClick={copyCoordinateLink}
-            className="button topbar-button"
-          >
-            Copy Link
-          </button>
-          <button
-            type="button"
-            onClick={toggleMeasurementMode}
-            className={`button topbar-button ${measurementMode ? "is-active" : ""}`}
-          >
-            {measurementMode ? "Stop Measure" : "Measure"}
-          </button>
-          <button
-            type="button"
-            onClick={() => toggleRoiTool("point")}
-            className={`button topbar-button ${roiTool === "point" ? "is-active" : ""}`}
-          >
-            ROI Point
-          </button>
-          <button
-            type="button"
-            onClick={() => toggleRoiTool("box")}
-            className={`button topbar-button ${roiTool === "box" ? "is-active" : ""}`}
-          >
-            ROI Box
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab("jobs");
-              void loadIndexQueue();
-              void loadIndexJobs({ silent: true });
-            }}
-            className="button topbar-button"
-            disabled={!activeDataset}
-            title="Open the Jobs panel for analysis and import runs."
-          >
-            Run
-          </button>
-          <button
-            type="button"
-            onClick={saveCurrentSession}
-            className="button topbar-button"
-            disabled={!activeDataset || !activeDerivative}
-          >
-            Save View
-          </button>
-          <button
-            type="button"
-            onClick={exportCurrentViewPng}
-            className="button topbar-button"
-          >
-            Export View
-          </button>
-          <button
-            type="button"
-            onClick={exportProjectBundle}
-            className="button topbar-button"
-          >
-            Bundle
-          </button>
-          {isTauri && (
+        {!isTauri ? (
+          <div className="topbar-actions" aria-label="Browser preview actions">
             <button
               type="button"
-              onClick={handleOpenLocalDirectory}
-              disabled={openingLocal}
+              onClick={copyCoordinateLink}
               className="button topbar-button"
             >
-              {openingLocal ? "Opening..." : "Open Local"}
+              Copy Link
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              onClick={() => setMirrorMode((current) => !current)}
+              className="button topbar-button"
+              title="Mirror the current Workbench layout horizontally."
+            >
+              {mirrorMode ? "Standard" : "Mirror"}
+            </button>
+            <button
+              type="button"
+              onClick={toggleMeasurementMode}
+              className={`button topbar-button ${measurementMode ? "is-active" : ""}`}
+            >
+              {measurementMode ? "Stop Measure" : "Measure"}
+            </button>
+            <button
+              type="button"
+              onClick={() => toggleRoiTool("point")}
+              className={`button topbar-button ${roiTool === "point" ? "is-active" : ""}`}
+            >
+              ROI Point
+            </button>
+            <button
+              type="button"
+              onClick={() => toggleRoiTool("box")}
+              className={`button topbar-button ${roiTool === "box" ? "is-active" : ""}`}
+            >
+              ROI Box
+            </button>
+            <button
+              type="button"
+              onClick={openJobsPanel}
+              className="button topbar-button"
+              disabled={!activeDataset}
+              title="Open the Jobs panel for analysis and import runs."
+            >
+              Run
+            </button>
+            <button
+              type="button"
+              onClick={saveCurrentSession}
+              className="button topbar-button"
+              disabled={!activeDataset || !activeDerivative}
+            >
+              Save View
+            </button>
+            <button
+              type="button"
+              onClick={exportCurrentViewPng}
+              className="button topbar-button"
+            >
+              Export View
+            </button>
+            <button
+              type="button"
+              onClick={exportProjectBundle}
+              className="button topbar-button"
+            >
+              Bundle
+            </button>
+          </div>
+        ) : null}
 
         <div className={`stream-serial ${streamState !== "READY" ? "active" : ""}`}>
           <span>{streamState}</span>
@@ -2283,7 +3693,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       </header>
 
       <div
-        className="cockpit-grid"
+        className={`cockpit-grid ${mirrorMode ? "workbench-mirror-mode" : ""}`}
         onDragOver={(event) => event.preventDefault()}
         onDrop={handleLocalDrop}
       >
@@ -2380,21 +3790,11 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
             )}
           </div>
 
-          {isTauri ? (
-            <button
-              type="button"
-              onClick={handleOpenLocalDirectory}
-              disabled={openingLocal}
-              className="button"
-              style={{ width: "100%", padding: "6px 10px", fontSize: 10 }}
-            >
-              {openingLocal ? "Scanning..." : "Open Local Zarr Folder"}
-            </button>
-          ) : (
+          {!isTauri ? (
             <p className="muted" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
               Native Workbench can open or drop local Zarr folders. Browser preview can inspect indexed data but cannot read arbitrary local paths.
             </p>
-          )}
+          ) : null}
 
           <div
             style={{
@@ -2441,6 +3841,28 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                       </strong>
                     </div>
                   ))}
+                </div>
+              ) : null}
+              {importStatus.kind === "error" || importStatus.kind === "warning" ? (
+                <div style={{ display: "grid", gridTemplateColumns: importStatus.path ? "1fr 1fr" : "1fr", gap: 6, marginTop: 7 }}>
+                  {importStatus.path ? (
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => void openLocalPath(importStatus.path!)}
+                      style={{ padding: "5px 7px", fontSize: 9.5 }}
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => setImportStatus(null)}
+                    style={{ padding: "5px 7px", fontSize: 9.5 }}
+                  >
+                    Dismiss
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -2501,14 +3923,16 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
               {activeMeasurements.length}
             </strong>
           </div>
-          <button
-            type="button"
-            className="button"
-            onClick={toggleMeasurementMode}
-            style={{ width: "100%", padding: "6px 10px", fontSize: 10, background: measurementMode ? "var(--foreground)" : "var(--button-face)", color: measurementMode ? "var(--background)" : "var(--foreground)" }}
-          >
-            {measurementMode ? "Stop Measuring" : "Measure Distance"}
-          </button>
+          {!isTauri ? (
+            <button
+              type="button"
+              className="button"
+              onClick={toggleMeasurementMode}
+              style={{ width: "100%", padding: "6px 10px", fontSize: 10, background: measurementMode ? "var(--foreground)" : "var(--button-face)", color: measurementMode ? "var(--background)" : "var(--foreground)" }}
+            >
+              {measurementMode ? "Stop Measuring" : "Measure Distance"}
+            </button>
+          ) : null}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
             <button
               type="button"
@@ -2579,24 +4003,26 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
               {activeRois.length}
             </strong>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-            <button
-              type="button"
-              className="button"
-              onClick={() => toggleRoiTool("point")}
-              style={{ padding: "5px 7px", fontSize: 9.5, background: roiTool === "point" ? "var(--foreground)" : "var(--button-face)", color: roiTool === "point" ? "var(--background)" : "var(--foreground)" }}
-            >
-              Point ROI
-            </button>
-            <button
-              type="button"
-              className="button"
-              onClick={() => toggleRoiTool("box")}
-              style={{ padding: "5px 7px", fontSize: 9.5, background: roiTool === "box" ? "var(--foreground)" : "var(--button-face)", color: roiTool === "box" ? "var(--background)" : "var(--foreground)" }}
-            >
-              Box ROI
-            </button>
-          </div>
+          {!isTauri ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              <button
+                type="button"
+                className="button"
+                onClick={() => toggleRoiTool("point")}
+                style={{ padding: "5px 7px", fontSize: 9.5, background: roiTool === "point" ? "var(--foreground)" : "var(--button-face)", color: roiTool === "point" ? "var(--background)" : "var(--foreground)" }}
+              >
+                Point ROI
+              </button>
+              <button
+                type="button"
+                className="button"
+                onClick={() => toggleRoiTool("box")}
+                style={{ padding: "5px 7px", fontSize: 9.5, background: roiTool === "box" ? "var(--foreground)" : "var(--button-face)", color: roiTool === "box" ? "var(--background)" : "var(--foreground)" }}
+              >
+                Box ROI
+              </button>
+            </div>
+          ) : null}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
             <button
               type="button"
@@ -2921,14 +4347,14 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 12, fontFamily: "var(--font-display)" }}>
                 <span className="muted" style={{ fontWeight: 600 }}>Slice</span>
                 <span style={{ color: "var(--atlas-blue-dark)", fontWeight: "bold" }}>
-                  {currentSlice + 1} / {maxSlicesForAxis}
+                  {currentClampedSlice + 1} / {maxSlicesForAxis}
                 </span>
               </div>
               <input
                 type="range"
                 min={0}
                 max={maxSlicesForAxis - 1}
-                value={currentSlice}
+                value={currentClampedSlice}
                 onChange={(e) => updateUrlParams({ slice: Number(e.target.value) })}
                 style={{ width: "100%", height: 6, outline: "none", cursor: "pointer", accentColor: "var(--atlas-blue)" }}
               />
@@ -3047,7 +4473,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
             xMax={xMax}
             physicalVoxelSizeNm={activeDerivative.physical_voxel_size_nm}
             axis={currentAxis}
-            slice={Math.min(currentSlice, maxSlicesForAxis - 1)}
+            slice={currentClampedSlice}
             minContrast={currentMinContrast}
             maxContrast={currentMaxContrast}
             logScale={currentLogScale}
@@ -3543,6 +4969,120 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 Workbench Session
               </span>
               <div style={{ display: "grid", gap: 8, fontSize: 11.5, fontFamily: "var(--font-display)", background: "rgba(0,0,0,0.1)", padding: "10px 12px", border: "1px solid var(--border)" }}>
+                {isTauri ? (
+                  <div style={{ display: "grid", gap: 7, border: "1px solid var(--border)", background: "var(--field-background)", padding: "8px 9px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                      <span className="muted" style={{ textTransform: "uppercase", fontSize: 9, fontWeight: 700 }}>
+                        CAOS Project
+                      </span>
+                      <strong style={{ color: currentProjectSaveStateColor, textTransform: "uppercase", fontSize: 9 }}>
+                        {currentProjectSaveState}
+                      </strong>
+                    </div>
+                    <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {currentProjectDisplayName}
+                      </span>
+                      <span className="muted" title={currentProjectPath || undefined} style={{ fontSize: 9, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {currentProjectPath ? formatPathBasename(currentProjectPath) : "Unsaved local project"}
+                      </span>
+                    </div>
+                    {projectRecoveryStatus ? (
+                      <div
+                        style={{
+                          borderTop: "1px solid var(--border)",
+                          paddingTop: 7,
+                          display: "grid",
+                          gap: 6,
+                        }}
+                      >
+                        <div style={{ color: projectRecoveryStatus.kind === "error" ? "var(--atlas-orange)" : "var(--foreground)", fontSize: 9.5, lineHeight: 1.35, overflowWrap: "anywhere" }}>
+                          {projectRecoveryStatus.summary}
+                        </div>
+                        {projectRecoveryStatus.path ? (
+                          <div className="muted" style={{ fontSize: 9, overflowWrap: "anywhere" }}>
+                            {projectRecoveryStatus.path}
+                          </div>
+                        ) : null}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                          {projectRecoveryStatus.action === "open-local-folder" ? (
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={() => void handleOpenLocalDirectory()}
+                              style={{ padding: "5px 7px", fontSize: 9.5 }}
+                            >
+                              Open Volume
+                            </button>
+                          ) : projectRecoveryStatus.action === "retry-project-open" && projectRecoveryStatus.actionPath ? (
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={() =>
+                                void openCaosProjectPath(projectRecoveryStatus.actionPath!, {
+                                  skipDirtyCheck: true,
+                                  actionLabel: "Opened",
+                                })
+                              }
+                              style={{ padding: "5px 7px", fontSize: 9.5 }}
+                            >
+                              Retry
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={() => setProjectRecoveryStatus(null)}
+                              style={{ padding: "5px 7px", fontSize: 9.5 }}
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="button"
+                            onClick={forgetProjectRecoveryPath}
+                            style={{ padding: "5px 7px", fontSize: 9.5 }}
+                          >
+                            Forget
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {recentCaosProjects.length > 0 ? (
+                      <div style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 7 }}>
+                        <span className="muted" style={{ textTransform: "uppercase", fontSize: 9, fontWeight: 700 }}>
+                          Recent Projects
+                        </span>
+                        {recentCaosProjects.slice(0, 3).map((project) => (
+                          <button
+                            key={project.path}
+                            type="button"
+                            className="button"
+                            onClick={() => void openCaosProjectPath(project.path)}
+                            title={project.path}
+                            style={{
+                              display: "grid",
+                              gap: 2,
+                              textAlign: "left",
+                              width: "100%",
+                              padding: "6px 8px",
+                              fontSize: 10,
+                              background: "rgba(0, 0, 0, 0.02)",
+                            }}
+                          >
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {project.name}
+                            </span>
+                            <span className="muted" style={{ fontSize: 9, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {project.datasetSlug} | {formatDateTime(project.lastOpenedAt)}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <input
                   className="search-input"
                   type="text"
@@ -3567,16 +5107,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                     fontFamily: "var(--font-body)",
                   }}
                 />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button
-                    type="button"
-                    className="button"
-                    disabled={!activeDataset || !activeDerivative}
-                    onClick={saveCurrentSession}
-                    style={{ padding: "6px 10px", fontSize: 10 }}
-                  >
-                    Save View
-                  </button>
+                {isTauri ? (
                   <button
                     type="button"
                     className="button"
@@ -3590,27 +5121,80 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                   >
                     Clear Draft
                   </button>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <button
-                    type="button"
-                    className="button"
-                    disabled={!activeDataset || !activeDerivative}
-                    onClick={exportCurrentViewPng}
-                    style={{ padding: "6px 10px", fontSize: 10 }}
-                  >
-                    Export View
-                  </button>
-                  <button
-                    type="button"
-                    className="button"
-                    disabled={!activeDataset || !activeDerivative}
-                    onClick={exportProjectBundle}
-                    style={{ padding: "6px 10px", fontSize: 10 }}
-                  >
-                    Export Bundle
-                  </button>
-                </div>
+                ) : (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={!activeDataset || !activeDerivative}
+                        onClick={saveCurrentSession}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Save View
+                      </button>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={!sessionNote && !sessionName}
+                        onClick={() => {
+                          setSessionName("");
+                          setSessionNote("");
+                          setSessionStatus("Draft cleared.");
+                        }}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Clear Draft
+                      </button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={!activeDataset || !activeDerivative}
+                        onClick={exportCurrentViewPng}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Export View
+                      </button>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={!activeDataset || !activeDerivative}
+                        onClick={exportProjectBundle}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Export Bundle
+                      </button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={!activeDataset || !activeDerivative}
+                        onClick={downloadCaosProject}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Export CAOS
+                      </button>
+                      <button
+                        type="button"
+                        className="button"
+                        onClick={() => caosProjectInputRef.current?.click()}
+                        style={{ padding: "6px 10px", fontSize: 10 }}
+                      >
+                        Import CAOS
+                      </button>
+                    </div>
+                  </>
+                )}
+                <input
+                  ref={caosProjectInputRef}
+                  type="file"
+                  accept="application/json,.json,.caos"
+                  onChange={(event) => void importCaosProject(event.target.files?.[0] || null)}
+                  style={{ display: "none" }}
+                />
 
                 {sessionStatus ? (
                   <div style={{ color: "var(--atlas-blue-dark)", fontSize: 10, lineHeight: 1.35 }}>
@@ -3837,7 +5421,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </button>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
                 <button
                   type="button"
                   className="button"
@@ -3850,6 +5434,9 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </button>
                 <button type="button" className="button" onClick={refreshWorkbenchData} disabled={indexQueueLoading} style={{ padding: "6px 8px", fontSize: 9.5 }}>
                   Refresh Data
+                </button>
+                <button type="button" className="button" onClick={openPrivateRegistryNative} disabled={!isTauri} style={{ padding: "6px 8px", fontSize: 9.5 }}>
+                  Registry
                 </button>
                 <button
                   type="button"
@@ -4021,6 +5608,326 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </div>
               )}
             </div>
+
+            {(activePrivateRegistrySummary || privateRegistryStatus || privateRegistryError) ? (
+              <div style={{ display: "grid", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span className="muted" style={{ display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: 0, fontFamily: "var(--font-display)", fontWeight: 600 }}>
+                      Local Registry
+                    </span>
+                    <strong style={{ display: "block", fontSize: 12, color: "var(--foreground)", fontFamily: "var(--font-display)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {activePrivateRegistrySummary?.registry_id || "Registry"}
+                    </strong>
+                    {privateRegistryPath ? (
+                      <span className="muted" title={privateRegistryPath} style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {formatPathBasename(privateRegistryPath)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    className="button"
+                      onClick={() => {
+                        setPrivateRegistry(null);
+                        setPrivateRegistrySummary(null);
+                        setPrivateRegistryNativePath(null);
+                        setPrivateRegistryPath(null);
+                        setPrivateRegistryQuery("");
+                        setPrivateRegistryQueueFilter("all");
+                        setPrivateRegistryProjectPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready));
+                        setPrivateRegistryConversionPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.conversion_queue));
+                        setPrivateRegistryReviewPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.review));
+                        setPrivateRegistryStatus("Private registry view cleared.");
+                        setPrivateRegistryError(null);
+                      }}
+                    disabled={!activePrivateRegistrySummary}
+                    style={{ padding: "5px 8px", fontSize: 9.5 }}
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                {privateRegistryError ? (
+                  <p style={{ margin: 0, color: "var(--atlas-orange)", fontSize: 11, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                    {privateRegistryError}
+                  </p>
+                ) : null}
+                {privateRegistryStatus ? (
+                  <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                    {privateRegistryStatus}
+                  </p>
+                ) : null}
+
+                {activePrivateRegistrySummary ? (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+                      {[
+                        ["Assets", activePrivateRegistrySummary.asset_count],
+                        ["Volumes", activePrivateRegistrySummary.volume_candidate_count],
+                        ["Open", activePrivateRegistrySummary.project_ready_count],
+                        ["Queue", privateRegistryConversionQueueTotal],
+                        ["Gaps", activePrivateRegistrySummary.metadata_gap_count],
+                        ["Fixity", activePrivateRegistrySummary.checksum_record_count],
+                        ["Review", activePrivateRegistrySummary.review_queue_count],
+                      ].map(([label, value]) => (
+                        <div
+                          key={label}
+                          style={{
+                            border: "1px solid var(--border)",
+                            background: "rgba(0, 0, 0, 0.06)",
+                            padding: "6px 7px",
+                            fontFamily: "var(--font-display)",
+                          }}
+                        >
+                          <span className="muted" style={{ display: "block", fontSize: 8.5, textTransform: "uppercase", letterSpacing: 0 }}>
+                            {label}
+                          </span>
+                          <strong style={{ display: "block", fontSize: 12, color: "var(--atlas-blue-dark)" }}>
+                            {value}
+                          </strong>
+                        </div>
+                        ))}
+                      </div>
+
+                      <div style={{ display: "grid", gap: 7 }}>
+                        <input
+                          type="search"
+                          aria-label="Search local registry assets"
+                          value={privateRegistryQuery}
+                          onChange={(event) => setPrivateRegistryQuery(event.target.value)}
+                          placeholder="Search path, format, dtype, status, gap"
+                          style={{
+                            width: "100%",
+                            minWidth: 0,
+                            border: "1px solid var(--border)",
+                            background: "rgba(255, 255, 255, 0.72)",
+                            color: "var(--foreground)",
+                            padding: "7px 8px",
+                            fontSize: 10.5,
+                            fontFamily: "var(--font-display)",
+                          }}
+                        />
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+                          {(Object.entries(PRIVATE_REGISTRY_QUEUE_FILTER_LABELS) as Array<[PrivateRegistryQueueFilter, string]>).map(([filter, label]) => (
+                            <button
+                              key={filter}
+                              type="button"
+                              className="button"
+                              onClick={() => setPrivateRegistryQueueFilter(filter)}
+                              style={{
+                                padding: "5px 6px",
+                                fontSize: 9,
+                                background: privateRegistryQueueFilter === filter ? "var(--atlas-blue)" : undefined,
+                                color: privateRegistryQueueFilter === filter ? "white" : undefined,
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 8 }}>
+                        <div style={{ display: "grid", gap: 6 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                            <strong style={{ display: "block", fontSize: 11, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                            Project Ready
+                            </strong>
+                            <span className="muted" style={{ fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                              {privateRegistryFilteredProjectReadyAssets.length} shown / {privateRegistryProjectReadyTotal}
+                            </span>
+                          </div>
+                          {privateRegistryFilteredProjectReadyAssets.length > 0 ? (
+                            privateRegistryFilteredProjectReadyAssets.map((asset) => {
+                              const target = findLoadedDerivativeForRegistryAsset(asset);
+                              return (
+                              <div
+                                key={asset.asset_id}
+                                style={{
+                                  display: "grid",
+                                  gap: 6,
+                                  border: "1px solid var(--border)",
+                                  background: "rgba(31, 111, 135, 0.08)",
+                                  padding: "8px 9px",
+                                }}
+                              >
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <strong style={{ display: "block", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                                      {asset.relative_path}
+                                    </strong>
+                                    <span className="muted" style={{ display: "block", fontSize: 9.5 }}>
+                                      {asset.metadata.format || "unknown"} | {formatBytes(asset.size_bytes)} | {formatDimensions(asset.metadata.dimensions)}
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="button"
+                                    onClick={() => openRegistryProjectReadyAsset(asset)}
+                                    disabled={!target}
+                                    title={target ? `Open ${target.dataset.slug}` : "Refresh Workbench data before opening this registry asset."}
+                                    style={{ padding: "5px 8px", fontSize: 9.5 }}
+                                  >
+                                    Open
+                                  </button>
+                                </div>
+                                <span style={{ color: "var(--atlas-blue-dark)", fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
+                                  {privateRegistryAssetStatusLabel(asset)}
+                                </span>
+                              </div>
+                            );
+                          })
+                          ) : (
+                            <p className="muted" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryProjectPage.loading ? "Loading project-ready registry assets." : "No project-ready registry assets match the current filters."}
+                            </p>
+                          )}
+                          {privateRegistryProjectPage.error ? (
+                            <p style={{ margin: 0, color: "var(--atlas-orange)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryProjectPage.error}
+                            </p>
+                          ) : null}
+                          {renderPrivateRegistryPager("project_ready", privateRegistryProjectPage)}
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                          <strong style={{ display: "block", fontSize: 11, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                            Conversion Queue
+                            </strong>
+                            <span className="muted" style={{ fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                              {privateRegistryFilteredConversionQueueAssets.length} shown / {privateRegistryConversionQueueTotal}
+                            </span>
+                          </div>
+                          {privateRegistryFilteredConversionQueueAssets.length > 0 ? (
+                            privateRegistryFilteredConversionQueueAssets.map((asset) => {
+                              const reviewBlockers = registryAssetReviewBlockers(asset);
+                              const queueMatch = findIndexQueueAssetForRegistryAsset(asset);
+                              const convertJob = queueMatch ? findIndexJob("convert", queueMatch.dataset.slug, queueMatch.asset.relative_path) : undefined;
+                              const convertBusy = convertJob && ["queued", "running", "cancel_requested"].includes(convertJob.status);
+                              const convertDisabled = Boolean(convertBusy || indexJobsLoading || (queueMatch && !queueMatch.asset.convert_command));
+                              return (
+                                <div
+                                key={asset.asset_id}
+                                style={{
+                                  display: "grid",
+                                  gap: 5,
+                                  border: "1px solid var(--border)",
+                                  background: "rgba(0, 0, 0, 0.08)",
+                                  padding: "8px 9px",
+                                }}
+                              >
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <strong style={{ display: "block", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                                      {asset.relative_path}
+                                    </strong>
+                                    <span className="muted" style={{ display: "block", fontSize: 9.5 }}>
+                                      {asset.metadata.format || "unknown"} | {formatBytes(asset.size_bytes)} | {formatDimensions(asset.metadata.dimensions)}
+                                    </span>
+                                  </div>
+                                  <span style={{ color: reviewBlockers.length ? "var(--atlas-orange)" : "var(--atlas-blue-dark)", fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
+                                    {privateRegistryAssetStatusLabel(asset)}
+                                  </span>
+                                </div>
+                                  <p className="muted" style={{ margin: 0, fontSize: 9.5, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                                    {reviewBlockers.length ? `${reviewBlockers.length} review flag${reviewBlockers.length === 1 ? "" : "s"}` : "metadata ready"} | source fixity {asset.checksum.algorithm || "none"} | {queueMatch ? `queue ${queueMatch.dataset.slug}` : "queue not matched"}
+                                  </p>
+                                  {convertJob ? (
+                                    <p className="muted" style={{ margin: 0, fontSize: 9.5, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                                      Latest convert job: {INDEX_JOB_STATUS_LABELS[convertJob.status] || convertJob.status}
+                                    </p>
+                                  ) : null}
+                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                    <button
+                                      type="button"
+                                      className="button"
+                                      disabled={convertDisabled}
+                                      onClick={() => startRegistryConversionAsset(asset)}
+                                      title={queueMatch ? "Run the sidecar conversion job for this registry asset." : "Scan the sidecar index queue and try to match this registry asset."}
+                                      style={{ padding: "4px 6px", fontSize: 9 }}
+                                    >
+                                      {convertBusy ? "Converting" : queueMatch ? (queueMatch.asset.convert_command ? "Run Convert" : "No Command") : indexQueue ? "Rescan" : "Scan Queue"}
+                                    </button>
+                                    {queueMatch?.asset.convert_command ? (
+                                      <button type="button" className="button" onClick={() => copyIndexCommand(queueMatch.asset.convert_command!)} style={{ padding: "4px 6px", fontSize: 9 }}>
+                                        Copy
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <p className="muted" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryConversionPage.loading ? "Loading conversion queue assets." : "No conversion-ready source assets match the current filters."}
+                            </p>
+                          )}
+                          {privateRegistryConversionPage.error ? (
+                            <p style={{ margin: 0, color: "var(--atlas-orange)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryConversionPage.error}
+                            </p>
+                          ) : null}
+                          {renderPrivateRegistryPager("conversion_queue", privateRegistryConversionPage)}
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                          <strong style={{ display: "block", fontSize: 11, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                            Review Pressure
+                            </strong>
+                            <span className="muted" style={{ fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                              {privateRegistryFilteredReviewAssets.length} shown / {privateRegistryReviewTotal}
+                            </span>
+                          </div>
+                          {privateRegistryFilteredReviewAssets.length > 0 ? (
+                            privateRegistryFilteredReviewAssets.map((asset) => (
+                              <div
+                                key={asset.asset_id}
+                                style={{
+                                  display: "grid",
+                                  gap: 5,
+                                  border: "1px solid var(--border)",
+                                  background: "rgba(0, 0, 0, 0.08)",
+                                  padding: "8px 9px",
+                                }}
+                              >
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <strong style={{ display: "block", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                                      {asset.relative_path}
+                                    </strong>
+                                    <span className="muted" style={{ display: "block", fontSize: 9.5 }}>
+                                      {asset.metadata.format || "unknown"} | {formatBytes(asset.size_bytes)} | {formatDimensions(asset.metadata.dimensions)}
+                                    </span>
+                                  </div>
+                                  <span style={{ color: asset.readiness.project_ready ? "var(--atlas-blue-dark)" : "var(--atlas-orange)", fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
+                                    {privateRegistryAssetStatusLabel(asset)}
+                                  </span>
+                                </div>
+                                <p className="muted" style={{ margin: 0, fontSize: 9.5, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                                  {asset.readiness.blockers.length} blockers | {asset.review.gap_codes.length} metadata gaps | rights {asset.status.rights_status}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="muted" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryReviewPage.loading ? "Loading review rows." : "No review rows match the current filters."}
+                            </p>
+                          )}
+                          {privateRegistryReviewPage.error ? (
+                            <p style={{ margin: 0, color: "var(--atlas-orange)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                              {privateRegistryReviewPage.error}
+                            </p>
+                          ) : null}
+                          {renderPrivateRegistryPager("review", privateRegistryReviewPage)}
+                        </div>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
 
             <div style={{ display: "grid", gap: 9, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
