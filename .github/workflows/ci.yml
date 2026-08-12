@@ -75,15 +75,15 @@ jobs:
       - name: Run web build
         run: make web-build
 
+      - name: Build packaged volume engine sidecar
+        working-directory: apps/desktop
+        run: npm run sidecar:build
+
       - name: Run desktop checks
         run: make desktop-typecheck desktop-test-caos desktop-build desktop-tauri-check
 
       - name: Run volume engine checks
         run: make volume-engine-check volume-engine-test
-
-      - name: Build packaged volume engine sidecar
-        working-directory: apps/desktop
-        run: npm run sidecar:build
 
       - name: Run stack smoke test
         run: make smoke-web
