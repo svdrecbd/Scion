@@ -169,6 +169,29 @@ The workset records source registry provenance, selected asset ids and paths, ri
 
 Workset selection is hard-capped at 10,000 assets. Use `--limit` for intentionally smaller selections; selections that cross the cap fail and must be partitioned by path or another selector. Query selection scans the asset JSONL directly and does not construct a full-registry in-memory search map.
 
+## Private Workset Derivatives
+
+`private_workset_derivative.py` converts one authorized, promoted TIFF or MRC asset into a Workbench-compatible OME-Zarr derivative without modifying the raw archive:
+
+```bash
+python3 workers/ingestion/private_workset_derivative.py convert \
+  --workset ~/Downloads/cell-anatomy-worksets/pilot-candidate/workset.json \
+  --asset-id ASSET_ID
+```
+
+Use `--relative-path` instead of `--asset-id` when that is the stable operator selector. The converter requires SHA-256 fixity, complete dimensions and physical voxel size, `can_convert`, `conversion_ready`, and no conversion blockers. It currently supports uncompressed classic TIFF / OME-TIFF at 8 or 16 bits and MRC modes 0, 1, and 6. Signed MRC values receive a recorded reversible integer offset so the strict unsigned Workbench reader can load them. MRC float32, HDF5 internals, BigTIFF, compressed TIFF, and proprietary formats remain blocked pending reader support and real archive fixtures.
+
+Outputs are recipe-addressed under the workset's `derivatives/` directory. Each store includes OME-NGFF 0.4 metadata and `caos-provenance.json`; `workset-derivatives.json` records source fixity, recipe id, output tree checksum, value transform, shape, chunking, physical scale, and validation. Source SHA-256 is verified again immediately before conversion. Chunk writes are atomic and checkpointed with per-chunk SHA-256, so interrupted jobs can reuse intact chunks and rewrite corrupted or incomplete chunks. A completed derivative is immutable: checksum drift, target collisions, and a second recipe for the same active asset fail closed.
+
+Opening `workset.json` in the native Workbench registers it with the local volume engine. Conversion-ready rows then use the same bounded single-job and persisted batch-run controls as public pilot assets. Registrations persist in the local Workbench state directory across sidecar restarts, and completed derivatives enter `workbench-data` for slice/3D viewing. The packaged desktop includes both ingestion worker scripts; a `python3` runtime is still required on the workstation.
+
+Emit the sidecar-compatible queue for operator inspection without converting:
+
+```bash
+python3 workers/ingestion/private_workset_derivative.py queue \
+  --workset ~/Downloads/cell-anatomy-worksets/pilot-candidate/workset.json
+```
+
 For the local public-data pilot bundle, import `pilot-index.json` plus each dataset's readiness, derivative, validation, and asset-state manifests directly:
 
 ```bash

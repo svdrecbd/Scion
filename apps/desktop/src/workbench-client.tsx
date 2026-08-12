@@ -285,6 +285,8 @@ type IndexQueueAsset = {
 
 type IndexQueueDataset = {
   slug: string;
+  archive_id?: string;
+  workset_id?: string;
   dataset?: {
     source?: string;
     entry_id?: string;
@@ -702,6 +704,9 @@ const normalizeLocalPath = (value: string | null | undefined) =>
     .replace(/\/+/g, "/")
     .replace(/\/$/, "");
 
+const privateWorksetDatasetSlug = (archiveId: string, worksetId: string) =>
+  `private-workset:${archiveId || "archive"}:${worksetId}`;
+
 const registryAssetReviewBlockers = (asset: PrivateRegistryAsset) =>
   asset.readiness.blockers.filter((blocker) => blocker !== "blocked_permission");
 
@@ -712,6 +717,9 @@ const registryIndexQueueKeys = (asset: PrivateRegistryAsset) => {
     .filter(Boolean);
 
   for (const path of rawPaths) {
+    if (asset.archive_id && asset.workset_id) {
+      keys.add(`${privateWorksetDatasetSlug(asset.archive_id, asset.workset_id)}\n${path}`);
+    }
     const parts = path.split("/").filter(Boolean);
     if (parts.length > 1) {
       const [datasetSlug, ...rest] = parts;
@@ -3063,6 +3071,11 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         worksetContents: file.worksetContents,
         assetsContents: file.assetsContents,
       });
+      await volumeJson<{ success: boolean }>("/api/volume/private-worksets/register", {
+        method: "POST",
+        body: JSON.stringify({ workset_path: file.path }),
+      });
+      const freshQueue = await volumeJson<IndexQueueResponse>("/api/volume/index-queue");
       setPrivateRegistry(parsed.registry);
       setPrivateRegistrySummary(parsed.registry.summary);
       setPrivateWorksetSummary(parsed.workset);
@@ -3074,8 +3087,9 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       setPrivateRegistryProjectPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready));
       setPrivateRegistryConversionPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.conversion_queue));
       setPrivateRegistryReviewPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.review));
+      setIndexQueue(freshQueue);
       setPrivateRegistryStatus(
-        `Loaded workset ${parsed.workset.workset_id} with ${parsed.workset.summary.selected_asset_count} selected asset${parsed.workset.summary.selected_asset_count === 1 ? "" : "s"}.`
+        `Loaded workset ${parsed.workset.workset_id} with ${parsed.workset.summary.selected_asset_count} selected asset${parsed.workset.summary.selected_asset_count === 1 ? "" : "s"}; its authorized conversion queue is registered with the local engine.`
       );
     } catch (error) {
       setPrivateRegistryError(error instanceof Error ? error.message : "Workset import failed.");

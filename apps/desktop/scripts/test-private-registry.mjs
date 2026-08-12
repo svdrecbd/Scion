@@ -555,6 +555,7 @@ test("private workset bundle normalizes promoted assets into bounded registry vi
   assert.equal(parsed.registry.summary.registry_id, "fixture-registry-curated");
   assert.equal(parsed.registry.conversionQueueAssets.length, 1);
   assert.equal(parsed.registry.conversionQueueAssets[0].relative_path, "raw/cell.mrc");
+  assert.equal(parsed.registry.conversionQueueAssets[0].workset_id, "pilot-workset");
   assert.equal(parsed.registry.assets[0].status.classification_status, "unreviewed");
   assert.equal(parsed.registry.assets[0].volume_candidate.candidate_status, "promoted_workset_candidate");
 });

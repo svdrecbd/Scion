@@ -124,7 +124,7 @@ An archive asset becomes eligible for Dataset / Repo Mode only after a promotion
 
 Promotion is the bridge between the 90 TB estate and the publication-focused Workbench loop.
 
-Current implementation status: `archive_registry.py apply-status-overlay` can rebuild a registry with curated rights, triage, publication, review, blocked-state, and allowed-operation decisions. `archive_registry.py promote-workset` then writes a bounded `workset.json` plus selected-asset JSONL/CSV sidecars. The promotion record captures registry provenance, selected asset ids and paths, rights/triage/publication status counts, checksum coverage, metadata readiness, intended operations, blocked operations, and the destination workset directory. The native Workbench can open `workset.json`, read `workset-assets.jsonl`, and show the promoted subset in the existing search, review, and conversion panels. Promotion and Workbench import do not copy raw bytes.
+Current implementation status: `archive_registry.py apply-status-overlay` can rebuild a registry with curated rights, triage, publication, review, blocked-state, and allowed-operation decisions. `archive_registry.py promote-workset` then writes a bounded `workset.json` plus selected-asset JSONL/CSV sidecars. The promotion record captures registry provenance, selected asset ids and paths, rights/triage/publication status counts, checksum coverage, metadata readiness, intended operations, blocked operations, and the destination workset directory. The native Workbench can open `workset.json`, read `workset-assets.jsonl`, show the promoted subset in the existing search, review, and conversion panels, and register that bounded workset with the volume-engine queue. `private_workset_derivative.py` can then turn authorized classic TIFF or supported integer MRC assets into immutable validated OME-Zarr derivatives while leaving raw bytes untouched.
 
 ## Current Repo Support
 
@@ -680,6 +680,9 @@ Current implementation status:
 - Selected matched conversion-queue registry rows can now build the same bounded batch-plan shape as public pilot index plans, then start persisted batch runs with checkpoint/resume through the existing volume-engine runner.
 - The volume engine can build a dry-run batch conversion plan with total and per-dataset caps, active/completed job skipping, optional failed-job retry inclusion, and an exportable checkpoint payload.
 - The volume engine can start a persisted batch conversion run from that plan, keep concurrency bounded, checkpoint the run under the local Workbench state directory, cancel active children, and resume paused/failed runs. The Workbench exposes plan, start, concurrency, cancel, resume, checkpoint path, and recent-run status controls.
+- Promoted private worksets register directly with the volume engine; registrations persist across sidecar restarts, TIFF/MRC conversions run through the same job controls, and validated outputs join `workbench-data` for slice and 3D viewing.
+- `private_workset_derivative.py` verifies source SHA-256, emits recipe-addressed uncompressed OME-Zarr v2 / OME-NGFF 0.4, checkpoints chunk digests for restart/corruption recovery, records reversible signed-MRC transforms, validates every chunk, and publishes a deterministic output tree checksum.
+- The golden archive test covers scanner, SHA-256, registry import, curated status, bounded promotion, conversion, derivative validation, and queue indexing in one synthetic path.
 - The public/private Atlas UI is not wired to the registry yet.
 
 ### 2. Read-Only Archive Scanner
@@ -741,6 +744,8 @@ Features:
 - no overwrite without explicit version bump
 
 The current volume engine reads strict raw uncompressed 3D Zarr v2 arrays. For this project, CAOS should keep that reader strict while adding a stronger conversion path that produces known-compatible derivatives.
+
+The first private derivative factory now implements the strict compatible subset: classic uncompressed 8/16-bit TIFF / OME-TIFF and MRC modes 0, 1, and 6 become single-scale uncompressed OME-Zarr. It gates on promoted permissions, metadata readiness, and source SHA-256; records immutable recipes and provenance; resumes only digest-valid chunks; rejects output drift and recipe collisions; and exposes results through the volume engine. The remaining pipeline work is multiscale/compression policy, previews, explicit recipe supersession, float readers, and real-fixture HDF5/BigTIFF/proprietary adapters.
 
 ### 5. Private Atlas / Archive Search
 
@@ -1047,7 +1052,7 @@ Exit criteria:
 ## Immediate Engineering Tasks
 
 1. Add richer local extractors and fixtures as real LBNL formats and failure modes are discovered.
-2. Generalize the derivative factory beyond the public TIFF pilot so private worksets can run versioned TIFF/MRC/HDF5-to-OME-Zarr jobs with validation and collision protection.
+2. Extend the private derivative factory from its tested classic TIFF and integer-MRC beachhead to real-fixture HDF5/BigTIFF/proprietary readers, then add multiscale/compression/preview policy and explicit recipe supersession.
 3. Add local mining summaries over bounded worksets: feature tables, duplicate/near-duplicate candidates, quality flags, morphology summaries, and publication-candidate evidence.
 4. Add cloud-provider-native copy verification where available, using source and remote checksums before or instead of rereading all bytes.
 
@@ -1088,6 +1093,10 @@ Completed in the repo:
 - Volume-engine dry-run batch conversion planner with total/per-dataset caps, active/completed job skips, failed-job retry policy, and checkpoint payloads
 - Volume-engine persisted batch conversion run registry with bounded concurrency, checkpoint files, cancel, resume, and child-job reconciliation
 - Workbench batch conversion plan controls, checkpoint export, configurable concurrency, start-run, cancel, resume, and recent-run status
+- `private_workset_derivative.py` permission-gated immutable TIFF/MRC-to-OME-Zarr conversion with source/output checksums, provenance, validation, signed-value transforms, and digest-verified resume checkpoints
+- Volume-engine private-workset registration, persistent restart recovery, private queue/job/batch routing, and derivative loading into Workbench slice/3D endpoints
+- packaged desktop ingestion worker resources plus repo/resource-root handoff to the volume-engine sidecar
+- golden synthetic archive test from scan and SHA-256 through registry, status overlay, promotion, conversion, validation, and indexed queue state
 - archive/private status fields in CAOS project volume references
 - `workers/ingestion/archive_pilot_report.py` local pilot report generator
 - `pilot-report.json`, `pilot-report.md`, `pilot-assets.csv`, and `pilot-review-queue.csv`

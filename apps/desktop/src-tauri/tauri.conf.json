@@ -38,6 +38,10 @@
     "externalBin": [
       "binaries/volume-engine"
     ],
+    "resources": {
+      "../../../workers/ingestion/public_data_pilot.py": "workers/ingestion/public_data_pilot.py",
+      "../../../workers/ingestion/private_workset_derivative.py": "workers/ingestion/private_workset_derivative.py"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

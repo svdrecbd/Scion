@@ -16,7 +16,7 @@ use std::{
 };
 use tauri::{
     menu::{AboutMetadata, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
-    Emitter, RunEvent,
+    Emitter, Manager, RunEvent,
 };
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -1402,56 +1402,68 @@ fn spawn_volume_engine_supervisor<R: tauri::Runtime + 'static>(
     tauri::async_runtime::spawn(async move {
         while !shutdown.load(Ordering::SeqCst) {
             match app.shell().sidecar("volume-engine") {
-                Ok(sidecar) => match sidecar
-                    .env("CELL_ANATOMY_VOLUME_ENGINE_TOKEN", &auth_token)
-                    .spawn()
-                {
-                    Ok((mut rx, child)) => {
-                        let pid = child.pid();
-                        println!(
-                            "Successfully spawned volume-engine sidecar process: pid {}",
-                            pid
-                        );
-                        replace_sidecar_child(&child_slot, child);
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                CommandEvent::Stdout(line) => {
-                                    let log_str = String::from_utf8_lossy(&line);
-                                    println!("sidecar stdout: {}", log_str.trim());
-                                }
-                                CommandEvent::Stderr(line) => {
-                                    let log_str = String::from_utf8_lossy(&line);
-                                    eprintln!("sidecar stderr: {}", log_str.trim());
-                                }
-                                CommandEvent::Error(error) => {
-                                    eprintln!("sidecar event error: {}", error);
-                                }
-                                CommandEvent::Terminated(payload) => {
-                                    clear_sidecar_child(&child_slot);
-                                    if shutdown.load(Ordering::SeqCst) {
-                                        eprintln!(
+                Ok(sidecar) => {
+                    let sidecar = match app.path().resource_dir() {
+                        Ok(resource_dir)
+                            if resource_dir
+                                .join("workers/ingestion/public_data_pilot.py")
+                                .is_file() =>
+                        {
+                            sidecar.env("CELL_ANATOMY_REPO_ROOT", resource_dir)
+                        }
+                        _ => sidecar,
+                    };
+                    match sidecar
+                        .env("CELL_ANATOMY_VOLUME_ENGINE_TOKEN", &auth_token)
+                        .spawn()
+                    {
+                        Ok((mut rx, child)) => {
+                            let pid = child.pid();
+                            println!(
+                                "Successfully spawned volume-engine sidecar process: pid {}",
+                                pid
+                            );
+                            replace_sidecar_child(&child_slot, child);
+                            while let Some(event) = rx.recv().await {
+                                match event {
+                                    CommandEvent::Stdout(line) => {
+                                        let log_str = String::from_utf8_lossy(&line);
+                                        println!("sidecar stdout: {}", log_str.trim());
+                                    }
+                                    CommandEvent::Stderr(line) => {
+                                        let log_str = String::from_utf8_lossy(&line);
+                                        eprintln!("sidecar stderr: {}", log_str.trim());
+                                    }
+                                    CommandEvent::Error(error) => {
+                                        eprintln!("sidecar event error: {}", error);
+                                    }
+                                    CommandEvent::Terminated(payload) => {
+                                        clear_sidecar_child(&child_slot);
+                                        if shutdown.load(Ordering::SeqCst) {
+                                            eprintln!(
                                             "volume-engine sidecar terminated during app shutdown: code {:?}, signal {:?}.",
                                             payload.code, payload.signal
                                         );
-                                    } else {
-                                        eprintln!(
+                                        } else {
+                                            eprintln!(
                                             "volume-engine sidecar terminated: code {:?}, signal {:?}. Restarting shortly.",
                                             payload.code, payload.signal
                                         );
+                                        }
+                                        break;
                                     }
-                                    break;
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
-                    }
-                    Err(error) => {
-                        eprintln!(
+                        Err(error) => {
+                            eprintln!(
                             "Failed to spawn volume-engine sidecar child process: {:?}. Retrying shortly.",
                             error
                         );
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     eprintln!(
                         "Failed to locate volume-engine sidecar binary: {:?}. Retrying shortly.",

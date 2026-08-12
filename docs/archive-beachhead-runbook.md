@@ -126,7 +126,30 @@ Registry import uses a disposable SQLite join index and streams final JSONL/CSV 
 
 The promoter enforces a 10,000-asset safety cap. That is an emergency ceiling, not a recommended pilot size; the first three worksets should normally contain tens of assets or fewer.
 
-## 8. Copy Verification And Restore
+## 8. Bounded Workset Conversion
+
+Only convert an asset after the curated workset records SHA-256 fixity, complete shape and physical voxel size, `can_convert`, `conversion_ready`, and no blockers. Opening the workset in the native Workbench registers its conversion-ready assets with the local queue. The equivalent operator command for one asset is:
+
+```bash
+python3 workers/ingestion/private_workset_derivative.py convert \
+  --workset /Volumes/caos-state/worksets/pilot-candidate/workset.json \
+  --asset-id ASSET_ID
+```
+
+The source is rehashed before bytes are read into a derivative. Output is a recipe-addressed, uncompressed OME-Zarr v2 / OME-NGFF 0.4 store under the workset, with per-chunk resume checksums, source provenance, validation, and a deterministic output tree checksum. Never remove an `.inprogress` directory merely because a process stopped; restarting the identical recipe verifies and reuses intact chunks. Do not change chunk policy for an asset with an already registered derivative: the factory rejects a second active recipe rather than making Workbench selection ambiguous.
+
+Accept a conversion only when:
+
+- the job completed rather than merely stopped logging
+- `workset-derivatives.json` contains exactly one active record for the asset
+- the record's `validation.status` is `passed`
+- source SHA-256 matches the promoted asset
+- output checksum, shape, dtype, chunking, scale, and any signed-value transform are recorded
+- the derivative opens through the Workbench slice or 3D path
+
+Current conversion support is deliberately narrow: uncompressed classic 8/16-bit TIFF / OME-TIFF and MRC modes 0, 1, and 6. MRC float32, HDF5 internals, BigTIFF, compressed TIFF, and proprietary formats must remain in review until supported by tested readers.
+
+## 9. Copy Verification And Restore
 
 CAOS currently verifies completed source and target scanner outputs; it does not perform the copy. Use institutionally approved copy tooling, scan both sides, and then run:
 
@@ -145,4 +168,5 @@ The comparison spills manifests to SQLite instead of loading both estates into R
 - A restarted scan re-enumerates the directory tree; checksum bytes are reusable, but the filesystem traversal cursor is not resumed in the middle of a directory.
 - Copy orchestration, provider-native checksum verification, retention configuration, and restore automation remain external.
 - HDF5 metadata is signature-only, BigTIFF is unsupported, and proprietary microscope formats need real-archive fixtures.
-- The generic private-workset conversion factory is not yet implemented; existing automated conversion is the bounded public TIFF pilot pipeline.
+- Private conversion currently emits one uncompressed single-scale OME-Zarr derivative per asset; multiscale pyramids, compression, preview generation, and active recipe supersession are not implemented.
+- The packaged desktop carries the conversion scripts but currently depends on a workstation `python3` runtime.

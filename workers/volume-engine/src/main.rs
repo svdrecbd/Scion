@@ -9,10 +9,10 @@ use axum::{
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead as StdBufRead, BufReader as StdBufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
@@ -28,6 +28,7 @@ use tower_http::cors::{Any, CorsLayer};
 static CUSTOM_DATASETS: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const VOLUME_ENGINE_TOKEN_HEADER: &str = "x-caos-volume-token";
+const MAX_PRIVATE_WORKSET_ASSETS: usize = 10_000;
 fn get_custom_datasets() -> &'static Mutex<Vec<serde_json::Value>> {
     CUSTOM_DATASETS.get_or_init(|| Mutex::new(load_custom_dataset_registry()))
 }
@@ -43,6 +44,7 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     index_jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
     index_batch_runs: Arc<Mutex<BTreeMap<String, IndexBatchRunRecord>>>,
+    private_worksets: Arc<Mutex<BTreeMap<String, PathBuf>>>,
 }
 
 #[derive(Clone)]
@@ -103,6 +105,11 @@ struct StartIndexJobRequest {
     kind: String,
     dataset_slug: String,
     asset_relative_path: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct RegisterPrivateWorksetRequest {
+    workset_path: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -286,6 +293,10 @@ fn get_custom_dataset_registry_path() -> PathBuf {
     get_workbench_state_dir().join("local-datasets.json")
 }
 
+fn get_private_workset_registry_path() -> PathBuf {
+    get_workbench_state_dir().join("private-worksets.json")
+}
+
 fn get_index_batch_runs_dir() -> PathBuf {
     get_workbench_state_dir().join("index-batch-runs")
 }
@@ -345,6 +356,67 @@ fn persist_custom_dataset_registry(datasets: &[Value]) -> Result<(), String> {
         .map_err(|err| format!("Failed to write registry {:?}: {}", registry_path, err))
 }
 
+fn load_private_workset_registry() -> BTreeMap<String, PathBuf> {
+    let registry_path = get_private_workset_registry_path();
+    let file = match File::open(&registry_path) {
+        Ok(file) => file,
+        Err(_) => return BTreeMap::new(),
+    };
+    let stored = match serde_json::from_reader::<_, BTreeMap<String, PathBuf>>(file) {
+        Ok(stored) => stored,
+        Err(error) => {
+            eprintln!(
+                "Failed to parse private workset registry {:?}: {}",
+                registry_path, error
+            );
+            return BTreeMap::new();
+        }
+    };
+    let mut loaded = BTreeMap::new();
+    for path in stored.into_values() {
+        let Ok(path) = canonical_workset_path(&path.to_string_lossy()) else {
+            continue;
+        };
+        let Ok(dataset) = private_workset_dataset_payload(&path) else {
+            continue;
+        };
+        let slug = value_str(&dataset, "slug");
+        if !slug.is_empty() {
+            loaded.insert(slug.to_string(), path);
+        }
+    }
+    loaded
+}
+
+fn persist_private_workset_registry(worksets: &BTreeMap<String, PathBuf>) -> Result<(), String> {
+    let registry_path = get_private_workset_registry_path();
+    let parent = registry_path
+        .parent()
+        .ok_or_else(|| "Private workset registry path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create private workset registry directory {:?}: {}",
+            parent, error
+        )
+    })?;
+    let staging =
+        registry_path.with_file_name(format!(".private-worksets.json.tmp-{}", std::process::id()));
+    let payload = serde_json::to_string_pretty(worksets)
+        .map_err(|error| format!("Failed to serialize private workset registry: {}", error))?;
+    let mut file = File::create(&staging)
+        .map_err(|error| format!("Failed to create registry {:?}: {}", staging, error))?;
+    file.write_all(payload.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|error| format!("Failed to write registry {:?}: {}", staging, error))?;
+    fs::rename(&staging, &registry_path).map_err(|error| {
+        let _ = fs::remove_file(&staging);
+        format!(
+            "Failed to replace private workset registry {:?}: {}",
+            registry_path, error
+        )
+    })
+}
+
 fn read_json_value(path: &Path) -> Option<Value> {
     let file = File::open(path).ok()?;
     serde_json::from_reader::<_, Value>(file).ok()
@@ -394,10 +466,8 @@ fn find_derivative<'a>(derivatives: &'a [Value], relative_path: &str) -> Option<
     })
 }
 
-fn pilot_index_queue_payload() -> Value {
-    let root = get_public_data_root();
-    let mut datasets = Vec::new();
-    let mut totals = serde_json::json!({
+fn empty_index_queue_totals() -> Value {
+    serde_json::json!({
         "datasets": 0,
         "assets": 0,
         "indexed": 0,
@@ -406,7 +476,13 @@ fn pilot_index_queue_payload() -> Value {
         "slice_cache_indexed": 0,
         "blocked": 0,
         "sidecars": 0
-    });
+    })
+}
+
+fn pilot_index_queue_payload() -> Value {
+    let root = get_public_data_root();
+    let mut datasets = Vec::new();
+    let mut totals = empty_index_queue_totals();
 
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -588,6 +664,368 @@ fn pilot_index_queue_payload() -> Value {
     })
 }
 
+fn canonical_workset_path(raw: &str) -> Result<PathBuf, String> {
+    let mut path = PathBuf::from(raw);
+    if path.is_dir() {
+        path = path.join("workset.json");
+    }
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve workset path {}: {}", raw, error))?;
+    if path.file_name().and_then(|value| value.to_str()) != Some("workset.json") {
+        return Err(
+            "Private workset registration requires workset.json or its directory.".to_string(),
+        );
+    }
+    Ok(path)
+}
+
+fn read_workset_jsonl_assets(path: &Path) -> Result<Vec<Value>, String> {
+    let assets_path = path
+        .parent()
+        .ok_or_else(|| "Could not resolve workset directory.".to_string())?
+        .join("workset-assets.jsonl");
+    let file = File::open(&assets_path)
+        .map_err(|error| format!("Could not open {:?}: {}", assets_path, error))?;
+    let mut assets = Vec::new();
+    let mut seen_asset_ids = BTreeSet::new();
+    for (index, line) in StdBufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| format!("Could not read {:?}: {}", assets_path, error))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let asset: Value = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Invalid workset asset JSON at {:?}:{}: {}",
+                assets_path,
+                index + 1,
+                error
+            )
+        })?;
+        if value_str(&asset, "schema") != "cell-anatomy-archive-workset-asset"
+            || asset.get("schema_version").and_then(|value| value.as_u64()) != Some(1)
+            || value_str(&asset, "asset_id").is_empty()
+            || value_str(&asset, "relative_path").is_empty()
+        {
+            return Err(format!(
+                "Unsupported or incomplete workset asset at {:?}:{}.",
+                assets_path,
+                index + 1
+            ));
+        }
+        if !seen_asset_ids.insert(value_str(&asset, "asset_id").to_string()) {
+            return Err(format!(
+                "Duplicate workset asset id at {:?}:{}.",
+                assets_path,
+                index + 1
+            ));
+        }
+        if assets.len() >= MAX_PRIVATE_WORKSET_ASSETS {
+            return Err(format!(
+                "Private worksets are capped at {} assets.",
+                MAX_PRIVATE_WORKSET_ASSETS
+            ));
+        }
+        assets.push(asset);
+    }
+    Ok(assets)
+}
+
+fn private_workset_slug(workset: &Value) -> Result<String, String> {
+    let archive_id = workset
+        .get("source_registry")
+        .and_then(|value| value.get("archive_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("archive");
+    let workset_id = workset
+        .get("workset_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Workset is missing workset_id.".to_string())?;
+    Ok(format!("private-workset:{}:{}", archive_id, workset_id))
+}
+
+fn private_workset_derivatives(path: &Path) -> Result<Vec<Value>, String> {
+    let manifest_path = match path.parent() {
+        Some(parent) => parent.join("workset-derivatives.json"),
+        None => return Ok(Vec::new()),
+    };
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    let manifest = read_json_value(&manifest_path).ok_or_else(|| {
+        format!(
+            "Could not read private derivative manifest at {:?}.",
+            manifest_path
+        )
+    })?;
+    if value_str(&manifest, "schema") != "cell-anatomy-workset-derivative-manifest"
+        || manifest
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            != Some(1)
+    {
+        return Err("Unsupported private derivative manifest schema.".to_string());
+    }
+    let derivatives = manifest
+        .get("derivatives")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .ok_or_else(|| "Private derivative manifest is missing derivatives.".to_string())?;
+    let workset_dir = path
+        .parent()
+        .ok_or_else(|| "Could not resolve workset directory.".to_string())?;
+    let allowed_root = workset_dir
+        .join("derivatives")
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve private derivatives directory: {}", error))?;
+    for derivative in &derivatives {
+        if value_str(derivative, "schema") != "cell-anatomy-workset-derivative"
+            || derivative
+                .get("schema_version")
+                .and_then(|value| value.as_u64())
+                != Some(1)
+        {
+            return Err("Unsupported private derivative schema.".to_string());
+        }
+        let output_path = PathBuf::from(value_str(derivative, "output_path"));
+        let canonical = output_path.canonicalize().map_err(|error| {
+            format!(
+                "Could not resolve private derivative {:?}: {}",
+                output_path, error
+            )
+        })?;
+        if !canonical.is_dir() || canonical.strip_prefix(&allowed_root).is_err() {
+            return Err(format!(
+                "Private derivative path escapes its workset: {:?}.",
+                output_path
+            ));
+        }
+    }
+    Ok(derivatives)
+}
+
+fn private_workset_dataset_payload(path: &Path) -> Result<Value, String> {
+    let workset = read_json_value(path)
+        .ok_or_else(|| format!("Could not read private workset summary at {:?}.", path))?;
+    if value_str(&workset, "schema") != "cell-anatomy-archive-workset"
+        || workset
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            != Some(1)
+    {
+        return Err("Unsupported private workset schema.".to_string());
+    }
+    let slug = private_workset_slug(&workset)?;
+    let assets = read_workset_jsonl_assets(path)?;
+    let derivatives = private_workset_derivatives(path)?;
+    let mut assets_out = Vec::new();
+    let mut indexed = 0usize;
+    let mut ready = 0usize;
+    let mut blocked = 0usize;
+    let mut viewable_derivatives = Vec::new();
+
+    for asset in assets {
+        let asset_id = value_str(&asset, "asset_id");
+        let relative_path = value_str(&asset, "relative_path");
+        let metadata = asset.get("metadata").cloned().unwrap_or(Value::Null);
+        let readiness = asset.get("readiness").cloned().unwrap_or(Value::Null);
+        let status = asset.get("status").cloned().unwrap_or(Value::Null);
+        let promotion = asset.get("promotion").cloned().unwrap_or(Value::Null);
+        let format = value_str(&metadata, "format").to_ascii_uppercase();
+        let dtype = value_str(&metadata, "dtype");
+        let existing = derivatives
+            .iter()
+            .find(|item| value_str(item, "asset_id") == asset_id);
+        let can_convert = status
+            .get("allowed_operations")
+            .and_then(|value| value.get("can_convert"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let can_view = status
+            .get("allowed_operations")
+            .and_then(|value| value.get("can_view_in_caos"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let conversion_ready = readiness
+            .get("conversion_ready")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let no_blockers = readiness
+            .get("blockers")
+            .and_then(|value| value.as_array())
+            .map(|values| values.is_empty())
+            .unwrap_or(true);
+        let conversion_blocked = promotion
+            .get("blocked_operations")
+            .and_then(|value| value.as_array())
+            .map(|values| values.iter().any(|value| value.as_str() == Some("convert")))
+            .unwrap_or(false);
+        let supported = match format.as_str() {
+            "TIFF" => matches!(dtype, "uint8" | "uint16"),
+            "MRC" => matches!(dtype, "int8" | "int16" | "uint16"),
+            _ => false,
+        };
+        let converter_available =
+            can_convert && conversion_ready && no_blockers && !conversion_blocked && supported;
+        let index_status = if existing.is_some() {
+            indexed += 1;
+            if can_view {
+                if let Some(derivative) = existing.cloned() {
+                    viewable_derivatives.push(derivative);
+                }
+            }
+            "indexed"
+        } else if converter_available {
+            ready += 1;
+            "ready_for_conversion"
+        } else {
+            blocked += 1;
+            "needs_review"
+        };
+        let convert_command = (converter_available && existing.is_none()).then(|| {
+            format!(
+                "python3 workers/ingestion/private_workset_derivative.py convert --workset {} --asset-id {}",
+                shell_quote(&path.to_string_lossy()),
+                shell_quote(asset_id)
+            )
+        });
+        assets_out.push(serde_json::json!({
+            "relative_path": relative_path,
+            "asset_id": asset_id,
+            "format": format,
+            "size_bytes": asset.get("size_bytes").cloned().unwrap_or(Value::Null),
+            "validated_state": if conversion_ready { "validated" } else { "needs_review" },
+            "streamable_state": if existing.is_some() { "indexed" } else { "" },
+            "slice_cache_state": "",
+            "index_status": index_status,
+            "dimensions": metadata.get("dimensions").cloned().unwrap_or(Value::Null),
+            "physical_voxel_size_nm": metadata.get("voxel_size_nm").cloned().unwrap_or(Value::Null),
+            "warnings": [],
+            "blockers": readiness.get("blockers").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "review_notes": asset.get("review").and_then(|value| value.get("recommended_actions")).cloned().unwrap_or_else(|| serde_json::json!([])),
+            "derivative": if can_view { existing.cloned() } else { None },
+            "convert_command": convert_command,
+            "slice_command": Value::Null,
+            "queue_source": "private-workset",
+            "workset_path": path.to_string_lossy()
+        }));
+    }
+
+    let title = workset
+        .get("title")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| workset.get("workset_id").and_then(|value| value.as_str()))
+        .unwrap_or(&slug);
+    let archive_id = workset
+        .get("source_registry")
+        .and_then(|value| value.get("archive_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("archive");
+    let workset_id = value_str(&workset, "workset_id");
+    Ok(serde_json::json!({
+        "slug": slug,
+        "archive_id": archive_id,
+        "workset_id": workset_id,
+        "dataset": {
+            "source": "Private Workset",
+            "entry_id": value_str(&workset, "workset_id"),
+            "title": title,
+            "experiment_type": "Promoted archive workset"
+        },
+        "readiness": {
+            "total_assets": assets_out.len(),
+            "ready_assets": ready,
+            "blocked_assets": blocked,
+            "status": if ready > 0 || indexed > 0 { "ready" } else { "blocked" }
+        },
+        "derivative_count": indexed,
+        "assets": assets_out,
+        "derivatives": viewable_derivatives,
+        "findings": workset.get("findings").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "queue_source": "private-workset",
+        "workset_path": path.to_string_lossy()
+    }))
+}
+
+fn increment_index_total(totals: &mut Value, key: &str, amount: u64) {
+    let current = totals
+        .get(key)
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    totals[key] = serde_json::json!(current + amount);
+}
+
+fn combined_index_queue_payload(private_worksets: &Arc<Mutex<BTreeMap<String, PathBuf>>>) -> Value {
+    let public = pilot_index_queue_payload();
+    let mut datasets = public
+        .get("datasets")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut totals = public
+        .get("summary")
+        .cloned()
+        .unwrap_or_else(empty_index_queue_totals);
+    let paths = private_worksets
+        .lock()
+        .map(|worksets| worksets.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for path in paths {
+        let Ok(dataset) = private_workset_dataset_payload(&path) else {
+            continue;
+        };
+        let readiness = dataset.get("readiness").cloned().unwrap_or(Value::Null);
+        increment_index_total(&mut totals, "datasets", 1);
+        increment_index_total(
+            &mut totals,
+            "assets",
+            readiness
+                .get("total_assets")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        );
+        increment_index_total(
+            &mut totals,
+            "indexed",
+            dataset
+                .get("derivative_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        );
+        increment_index_total(
+            &mut totals,
+            "ready_for_conversion",
+            readiness
+                .get("ready_assets")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        );
+        increment_index_total(
+            &mut totals,
+            "blocked",
+            readiness
+                .get("blocked_assets")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        );
+        datasets.retain(|existing| value_str(existing, "slug") != value_str(&dataset, "slug"));
+        datasets.push(dataset);
+    }
+    let public_root_exists = public
+        .get("root_exists")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    serde_json::json!({
+        "root": public.get("root").cloned().unwrap_or(Value::String(String::new())),
+        "root_exists": public_root_exists || !datasets.is_empty(),
+        "summary": totals,
+        "datasets": datasets
+    })
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -648,10 +1086,11 @@ fn normalize_index_job_kind(kind: &str) -> Option<&'static str> {
 
 fn resolve_index_job_command(
     request: &StartIndexJobRequest,
+    private_worksets: &Arc<Mutex<BTreeMap<String, PathBuf>>>,
 ) -> Result<(String, Vec<String>, String, PathBuf), String> {
     let kind = normalize_index_job_kind(&request.kind)
         .ok_or_else(|| "Unsupported index job kind. Use convert or slices.".to_string())?;
-    let queue = pilot_index_queue_payload();
+    let queue = combined_index_queue_payload(private_worksets);
     if !queue
         .get("root_exists")
         .and_then(|value| value.as_bool())
@@ -720,28 +1159,67 @@ fn resolve_index_job_command(
         ));
     }
 
-    let root = queue
-        .get("root")
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    let command = vec![
-        "python3".to_string(),
-        script_path.to_string_lossy().to_string(),
-        kind.to_string(),
-        request.dataset_slug.clone(),
-        "--root".to_string(),
-        root.clone(),
-        "--asset".to_string(),
-        request.asset_relative_path.clone(),
-    ];
-    let command_display = format!(
-        "python3 workers/ingestion/public_data_pilot.py {} {} --root {} --asset {}",
-        kind,
-        shell_quote(&request.dataset_slug),
-        shell_quote(&root),
-        shell_quote(&request.asset_relative_path)
-    );
+    let queue_source = value_str(dataset, "queue_source");
+    let (command, command_display) = if queue_source == "private-workset" {
+        if kind != "convert" {
+            return Err("Private worksets currently support conversion jobs only.".to_string());
+        }
+        let private_script = repo_root.join("workers/ingestion/private_workset_derivative.py");
+        if !private_script.exists() {
+            return Err(format!(
+                "Private workset derivative script not found at {}.",
+                private_script.to_string_lossy()
+            ));
+        }
+        let workset_path = value_str(dataset, "workset_path").to_string();
+        let asset_id = value_str(asset, "asset_id").to_string();
+        if workset_path.is_empty() || asset_id.is_empty() {
+            return Err(
+                "Private workset queue entry is missing workset_path or asset_id.".to_string(),
+            );
+        }
+        (
+            vec![
+                "python3".to_string(),
+                private_script.to_string_lossy().to_string(),
+                "convert".to_string(),
+                "--workset".to_string(),
+                workset_path.clone(),
+                "--asset-id".to_string(),
+                asset_id.clone(),
+            ],
+            format!(
+                "python3 workers/ingestion/private_workset_derivative.py convert --workset {} --asset-id {}",
+                shell_quote(&workset_path),
+                shell_quote(&asset_id)
+            ),
+        )
+    } else {
+        let root = queue
+            .get("root")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        (
+            vec![
+                "python3".to_string(),
+                script_path.to_string_lossy().to_string(),
+                kind.to_string(),
+                request.dataset_slug.clone(),
+                "--root".to_string(),
+                root.clone(),
+                "--asset".to_string(),
+                request.asset_relative_path.clone(),
+            ],
+            format!(
+                "python3 workers/ingestion/public_data_pilot.py {} {} --root {} --asset {}",
+                kind,
+                shell_quote(&request.dataset_slug),
+                shell_quote(&root),
+                shell_quote(&request.asset_relative_path)
+            ),
+        )
+    };
 
     Ok((kind.to_string(), command, command_display, repo_root))
 }
@@ -1286,7 +1764,8 @@ fn start_index_job(
     state: &AppState,
     request: StartIndexJobRequest,
 ) -> Result<IndexJobRecord, String> {
-    let (kind, command, command_display, repo_root) = resolve_index_job_command(&request)?;
+    let (kind, command, command_display, repo_root) =
+        resolve_index_job_command(&request, &state.private_worksets)?;
     let id = unique_local_id("index_job");
     let record = IndexJobRecord {
         id: id.clone(),
@@ -1809,7 +2288,11 @@ fn get_public_data_root() -> PathBuf {
     PathBuf::from("cell-anatomy-public-data")
 }
 
-fn locate_zarr_derivative(dataset: &str, asset_path: &str) -> Option<DerivativeEntry> {
+fn locate_zarr_derivative(
+    dataset: &str,
+    asset_path: &str,
+    private_worksets: &Arc<Mutex<BTreeMap<String, PathBuf>>>,
+) -> Option<DerivativeEntry> {
     if dataset.starts_with("custom_") {
         let guard = get_custom_datasets().lock().unwrap();
         for val in guard.iter() {
@@ -1829,6 +2312,21 @@ fn locate_zarr_derivative(dataset: &str, asset_path: &str) -> Option<DerivativeE
             }
         }
         return None;
+    }
+    let private_path = private_worksets
+        .lock()
+        .ok()
+        .and_then(|worksets| worksets.get(dataset).cloned());
+    if let Some(path) = private_path {
+        let dataset = private_workset_dataset_payload(&path).ok()?;
+        let derivatives = dataset.get("derivatives")?.as_array()?;
+        return derivatives.into_iter().find_map(|value| {
+            if value_str(&value, "source_relative_path") == asset_path {
+                serde_json::from_value::<DerivativeEntry>(value.clone()).ok()
+            } else {
+                None
+            }
+        });
     }
     let root = get_public_data_root();
     let manifest_path = root
@@ -1865,11 +2363,17 @@ fn parse_zarray(zattrs_dir: &Path) -> Option<Zarray> {
     None
 }
 
-async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
-    let entry = match locate_zarr_derivative(&params.dataset, &params.asset) {
-        Some(e) => e,
-        None => return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response(),
-    };
+async fn handle_slice(
+    State(state): State<AppState>,
+    Query(params): Query<SliceParams>,
+) -> impl IntoResponse {
+    let entry =
+        match locate_zarr_derivative(&params.dataset, &params.asset, &state.private_worksets) {
+            Some(e) => e,
+            None => {
+                return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response()
+            }
+        };
 
     let zarr_dir = PathBuf::from(&entry.output_path);
     let zarr_config = match parse_zarray(&zarr_dir) {
@@ -2129,16 +2633,22 @@ struct Volume3DParams {
     downsample: Option<usize>,
 }
 
-async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResponse {
+async fn handle_volume_3d(
+    State(state): State<AppState>,
+    Query(params): Query<Volume3DParams>,
+) -> impl IntoResponse {
     let downsample = params.downsample.unwrap_or(4);
     if downsample == 0 {
         return (StatusCode::BAD_REQUEST, "Downsample factor cannot be zero").into_response();
     }
 
-    let entry = match locate_zarr_derivative(&params.dataset, &params.asset) {
-        Some(e) => e,
-        None => return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response(),
-    };
+    let entry =
+        match locate_zarr_derivative(&params.dataset, &params.asset, &state.private_worksets) {
+            Some(e) => e,
+            None => {
+                return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response()
+            }
+        };
 
     let zarr_dir = PathBuf::from(&entry.output_path);
     let zarr_config = match parse_zarray(&zarr_dir) {
@@ -2549,13 +3059,61 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
         .into_response()
 }
 
-async fn handle_index_queue() -> impl IntoResponse {
+async fn handle_index_queue(State(state): State<AppState>) -> impl IntoResponse {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_string(&pilot_index_queue_payload()).unwrap(),
+        serde_json::to_string(&combined_index_queue_payload(&state.private_worksets)).unwrap(),
     )
         .into_response()
+}
+
+async fn handle_register_private_workset(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<RegisterPrivateWorksetRequest>,
+) -> impl IntoResponse {
+    let path = match canonical_workset_path(&payload.workset_path) {
+        Ok(path) => path,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error }),
+            )
+        }
+    };
+    let dataset = match private_workset_dataset_payload(&path) {
+        Ok(dataset) => dataset,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error }),
+            )
+        }
+    };
+    let slug = value_str(&dataset, "slug").to_string();
+    match state.private_worksets.lock() {
+        Ok(mut worksets) => {
+            let mut updated = worksets.clone();
+            updated.insert(slug, path);
+            if let Err(error) = persist_private_workset_registry(&updated) {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": error }),
+                );
+            }
+            *worksets = updated;
+        }
+        Err(_) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "Private workset registry is unavailable." }),
+            )
+        }
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({ "success": true, "dataset": dataset }),
+    )
 }
 
 async fn handle_list_index_jobs(State(state): State<AppState>) -> impl IntoResponse {
@@ -2585,7 +3143,7 @@ async fn handle_index_batch_plan(
     State(state): State<AppState>,
     axum::extract::Json(payload): axum::extract::Json<IndexBatchPlanRequest>,
 ) -> impl IntoResponse {
-    let queue = pilot_index_queue_payload();
+    let queue = combined_index_queue_payload(&state.private_worksets);
     let jobs = state
         .index_jobs
         .lock()
@@ -2852,13 +3410,44 @@ async fn handle_retry_index_job(
     }
 }
 
-async fn handle_workbench_data() -> impl IntoResponse {
+async fn handle_workbench_data(State(state): State<AppState>) -> impl IntoResponse {
     let mut packaged_datasets = Vec::new();
 
     {
         if let Ok(guard) = get_custom_datasets().lock() {
             packaged_datasets.extend(guard.clone());
         }
+    }
+
+    let private_paths = state
+        .private_worksets
+        .lock()
+        .map(|worksets| worksets.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for path in private_paths {
+        let Ok(dataset) = private_workset_dataset_payload(&path) else {
+            continue;
+        };
+        let derivatives = dataset
+            .get("derivatives")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if derivatives.is_empty() {
+            continue;
+        }
+        let metadata = dataset.get("dataset").cloned().unwrap_or(Value::Null);
+        packaged_datasets
+            .retain(|existing| value_str(existing, "slug") != value_str(&dataset, "slug"));
+        packaged_datasets.push(serde_json::json!({
+            "slug": value_str(&dataset, "slug"),
+            "title": value_str(&metadata, "title"),
+            "source": value_str(&metadata, "source"),
+            "entryId": value_str(&metadata, "entry_id"),
+            "experimentType": value_str(&metadata, "experiment_type"),
+            "derivatives": derivatives,
+            "findings": dataset.get("findings").cloned().unwrap_or_else(|| serde_json::json!([]))
+        }));
     }
 
     let root = get_public_data_root();
@@ -5201,6 +5790,98 @@ mod tests {
         ));
     }
 
+    fn private_workset_fixture(workset_id: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(unique_local_id("caos_private_workset_test"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("workset.json"),
+            serde_json::to_vec(&json!({
+                "schema": "cell-anatomy-archive-workset",
+                "schema_version": 1,
+                "workset_id": workset_id,
+                "title": "Fixture Workset",
+                "source_registry": {
+                    "registry_id": "fixture-registry",
+                    "archive_id": "fixture-archive",
+                    "archive_root": root
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let asset = json!({
+            "schema": "cell-anatomy-archive-workset-asset",
+            "schema_version": 1,
+            "asset_id": "fixture-asset",
+            "relative_path": "raw/cell.mrc",
+            "size_bytes": 1072,
+            "metadata": {
+                "format": "MRC",
+                "dtype": "uint16",
+                "dimensions": { "z": 2, "y": 3, "x": 4 },
+                "voxel_size_nm": { "z": 5.0, "y": 2.0, "x": 2.0 }
+            },
+            "status": { "allowed_operations": { "can_convert": true } },
+            "readiness": { "conversion_ready": true, "blockers": [] },
+            "promotion": { "blocked_operations": [] }
+        });
+        fs::write(
+            root.join("workset-assets.jsonl"),
+            format!("{}\n", serde_json::to_string(&asset).unwrap()),
+        )
+        .unwrap();
+        root.join("workset.json").canonicalize().unwrap()
+    }
+
+    #[test]
+    fn private_workset_registers_as_a_runnable_conversion_queue() {
+        let workset_path = private_workset_fixture("fixture-workset");
+        let dataset = private_workset_dataset_payload(&workset_path).unwrap();
+        assert_eq!(
+            dataset["slug"],
+            "private-workset:fixture-archive:fixture-workset"
+        );
+        assert_eq!(dataset["readiness"]["ready_assets"], 1);
+        assert_eq!(dataset["assets"][0]["index_status"], "ready_for_conversion");
+
+        let registry = Arc::new(Mutex::new(BTreeMap::from([(
+            "private-workset:fixture-archive:fixture-workset".to_string(),
+            workset_path.clone(),
+        )])));
+        let request = StartIndexJobRequest {
+            kind: "convert".to_string(),
+            dataset_slug: "private-workset:fixture-archive:fixture-workset".to_string(),
+            asset_relative_path: "raw/cell.mrc".to_string(),
+        };
+        let (kind, command, display, _) = resolve_index_job_command(&request, &registry).unwrap();
+        assert_eq!(kind, "convert");
+        assert_eq!(command[0], "python3");
+        assert!(command
+            .iter()
+            .any(|value| value.ends_with("private_workset_derivative.py")));
+        assert!(command.iter().any(|value| value == "fixture-asset"));
+        assert!(display.contains("--workset"));
+
+        fs::remove_dir_all(workset_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn private_worksets_from_one_archive_keep_distinct_queue_identities() {
+        let first = private_workset_fixture("pilot-one");
+        let second = private_workset_fixture("pilot-two");
+        let first_dataset = private_workset_dataset_payload(&first).unwrap();
+        let second_dataset = private_workset_dataset_payload(&second).unwrap();
+        let first_slug = value_str(&first_dataset, "slug").to_string();
+        let second_slug = value_str(&second_dataset, "slug").to_string();
+        assert_ne!(first_slug, second_slug);
+        let registered =
+            BTreeMap::from([(first_slug, first.clone()), (second_slug, second.clone())]);
+        assert_eq!(registered.len(), 2);
+
+        fs::remove_dir_all(first.parent().unwrap()).unwrap();
+        fs::remove_dir_all(second.parent().unwrap()).unwrap();
+    }
+
     fn fixture_queue() -> Value {
         json!({
             "root": "/tmp/scion-public-data",
@@ -5429,6 +6110,7 @@ async fn main() {
         db: Arc::new(Mutex::new(conn)),
         index_jobs: Arc::new(Mutex::new(BTreeMap::new())),
         index_batch_runs: Arc::new(Mutex::new(load_index_batch_runs())),
+        private_worksets: Arc::new(Mutex::new(load_private_workset_registry())),
     };
     let auth = VolumeEngineAuth {
         token: std::env::var("CELL_ANATOMY_VOLUME_ENGINE_TOKEN")
@@ -5449,6 +6131,10 @@ async fn main() {
         .route("/api/volume/workbench-data", get(handle_workbench_data))
         .route("/api/volume/open-local", get(handle_open_local))
         .route("/api/volume/index-queue", get(handle_index_queue))
+        .route(
+            "/api/volume/private-worksets/register",
+            post(handle_register_private_workset),
+        )
         .route(
             "/api/volume/index-jobs",
             get(handle_list_index_jobs).post(handle_start_index_job),

@@ -49,6 +49,7 @@ export type PrivateRegistryAsset = {
   registry_id: string;
   asset_id: string;
   archive_id: string;
+  workset_id?: string;
   relative_path: string;
   name: string;
   path_type: string;
@@ -202,6 +203,7 @@ export type PrivateRegistryLoadedDerivative = {
     assetId?: string;
     archiveId?: string;
     relativePath?: string;
+    worksetId?: string;
   };
 };
 
@@ -445,6 +447,7 @@ export const validatePrivateRegistryAsset = (value: unknown, path = "asset"): Pr
     registry_id: requireNonEmptyString(asset.registry_id, `${path}.registry_id`),
     asset_id: requireNonEmptyString(asset.asset_id, `${path}.asset_id`),
     archive_id: requireNonEmptyString(asset.archive_id, `${path}.archive_id`),
+    workset_id: optionalString(asset.workset_id),
     relative_path: requireNonEmptyString(asset.relative_path, `${path}.relative_path`),
     name: requireString(asset.name, `${path}.name`),
     path_type: requireNonEmptyString(asset.path_type, `${path}.path_type`),
@@ -678,6 +681,7 @@ const normalizeWorksetAsset = (value: unknown, workset: PrivateWorksetSummary, i
       registry_id: stringValue(asset.registry_id, workset.source_registry.registry_id || workset.workset_id),
       asset_id: requireNonEmptyString(asset.asset_id, `workset-assets[${index}].asset_id`),
       archive_id: stringValue(asset.archive_id, workset.source_registry.archive_id || "archive"),
+      workset_id: workset.workset_id,
       relative_path: relativePath,
       name: relativePath.split("/").pop() || relativePath,
       path_type: requireNonEmptyString(asset.path_type, `workset-assets[${index}].path_type`),
