@@ -28,3 +28,4 @@ tokio = { version = "1", features = ["time"] }
 rfd = "0.15"
 base64 = "0.22"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }

@@ -79,6 +79,31 @@ def test_similar_and_plan_endpoints_work_with_in_memory_repository(client: TestC
     assert "precedents" in payload
 
 
+def test_caos_handoff_is_versioned_and_preserves_missing_data_state(client: TestClient) -> None:
+    search_response = client.get("/api/datasets")
+    dataset_id = search_response.json()["results"][0]["dataset_id"]
+
+    response = client.get(f"/api/datasets/{dataset_id}/caos-handoff")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema"] == "cell-anatomy-caos-handoff"
+    assert payload["schema_version"] == 1
+    assert payload["dataset"]["dataset_id"] == dataset_id
+    assert payload["requirements"] == {
+        "local_data_required": True,
+        "raw_data_included": False,
+        "automatic_download_allowed": False,
+        "minimum_workbench_schema_version": 1,
+    }
+    assert payload["integrity"]["algorithm"] == "sha256"
+    assert len(payload["integrity"]["dataset_fingerprint"]) == 64
+    assert response.headers["content-disposition"].endswith(
+        f'filename="{dataset_id}.caos-handoff.json"'
+    )
+    assert response.headers["cache-control"] == "no-store"
+
+
 class BrokenDatasetRepository:
     def search_datasets(self, **kwargs):
         raise DatabaseUnavailableError("The corpus database is unavailable.")

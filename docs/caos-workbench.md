@@ -24,6 +24,14 @@ The bridge between modes is promotion: a selected archive asset or group of asse
 
 The backend already contains account, session, device pairing, and saved-state groundwork. CAOS should treat that as dormant infrastructure until the email-code system is settled. The desktop UI can be account-aware, but the only acceptable shipping behavior right now is local project export/import plus clear account readiness metadata.
 
+## Atlas Handoff
+
+The public Atlas and local Workbench now share a versioned `cell-anatomy-caos-handoff` contract. A dataset detail page downloads a metadata-only JSON handoff containing the complete Atlas record, public repository locators, intended operations, an initial project name/note, explicit data requirements, and a deterministic SHA-256 fingerprint over stable dataset identity and provenance fields.
+
+Workbench import verifies the schema and fingerprint before applying context. A matching loaded dataset can be resolved by exact dataset id, study id, or repository accession. When no derivative is available, the handoff remains durable pending context rather than pretending that the volume was transferred. It can be paired with local data later and is included in Workbench bundle exports. Handoffs never contain raw image bytes, authorize automatic download, or bypass local compatibility and provenance checks.
+
+The packaged Tauri application also creates a fresh in-memory token for each volume-engine launch. The sidecar requires that token on loopback requests, while standalone browser development remains available when no token is configured. This closes the previous unauthenticated cross-origin loopback boundary without turning local data into an account-backed service.
+
 ## Project File Contract
 
 CAOS project files use the `cell-anatomy-caos-project` schema with a numeric schema version. A project snapshot contains:

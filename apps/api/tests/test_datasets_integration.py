@@ -77,6 +77,14 @@ def test_dataset_detail_and_similar_routes_work_with_seeded_ids(
     similar_payload = similar_response.json()
     assert all(item["dataset_id"] != dataset_id for item in similar_payload)
 
+    handoff_response = integration_client.get(f"/api/datasets/{dataset_id}/caos-handoff")
+    assert handoff_response.status_code == 200
+    handoff_payload = handoff_response.json()
+    assert handoff_payload["dataset"]["dataset_id"] == dataset_id
+    assert handoff_payload["dataset"]["publication_pmid"]
+    assert handoff_payload["project_seed"]["intended_operations"]
+    assert handoff_payload["requirements"]["raw_data_included"] is False
+
 
 def test_compare_and_export_routes_use_seeded_dataset_records(
     integration_client: TestClient,

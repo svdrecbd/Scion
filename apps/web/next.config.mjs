@@ -8,12 +8,14 @@ const apiBaseUrl = (
 const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${apiBaseUrl}/:path*`,
-      },
-    ];
+    return {
+      fallback: [
+        {
+          source: "/api/:path*",
+          destination: `${apiBaseUrl}/:path*`,
+        },
+      ],
+    };
   },
 };
 

@@ -195,6 +195,16 @@ def main() -> None:
                     if status != 200:
                         raise RuntimeError(f"Unexpected status {status} for {url}")
 
+                handoff_url = f"http://127.0.0.1:{web_port}/api/datasets/{dataset_ids[0]}/caos-handoff"
+                print(f"smoke: checking {handoff_url}", flush=True)
+                handoff = wait_for_json(handoff_url)
+                if (
+                    not isinstance(handoff, dict)
+                    or handoff.get("schema") != "cell-anatomy-caos-handoff"
+                    or handoff.get("dataset", {}).get("dataset_id") != dataset_ids[0]
+                ):
+                    raise RuntimeError("Atlas-to-CAOS handoff failed through the web/API boundary.")
+
     print("smoke test passed")
 
 

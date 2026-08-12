@@ -102,6 +102,7 @@ Account login codes are written to `apps/api/.run/auth-codes.log` in local devel
 - [x] Export Engine (CSV/JSON/BibTeX).
 - [x] Managed local stack, readiness checks, and GitHub Actions CI.
 - [x] Email-code accounts with durable browser sessions and paired Workbench devices.
+- [x] Versioned Atlas-to-CAOS handoff files that preserve pending dataset context without transferring raw data.
 
 ## Collaboration notes
 

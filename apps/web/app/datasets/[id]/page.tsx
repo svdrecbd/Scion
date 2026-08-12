@@ -195,6 +195,14 @@ export default async function DatasetPage({
               This record was ingested from the <em>Cell Anatomy Scoping Review</em> corpus.
             </p>
             <div className="stat-row">
+              <a
+                href={`/api/datasets/${encodeURIComponent(dataset.dataset_id)}/caos-handoff`}
+                download={`${dataset.dataset_id}.caos-handoff.json`}
+                className="button"
+                style={{ textDecoration: "none", textAlign: "center" }}
+              >
+                Open in CAOS
+              </a>
               {dataset.publication_pmid && (
                 <a
                   href={`https://pubmed.ncbi.nlm.nih.gov/${dataset.publication_pmid}/`}
@@ -233,6 +241,10 @@ export default async function DatasetPage({
                 )
               )}
             </div>
+            <p className="muted" style={{ margin: "14px 0 0", fontSize: "0.85rem", lineHeight: 1.5 }}>
+              The CAOS handoff carries this Atlas record, public repository locators, and a
+              provenance fingerprint. It does not contain or automatically download image data.
+            </p>
             {(dataset.public_locator_urls?.length ?? 0) > 0 && (
               <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
                 <div className="kicker" style={{ margin: 0 }}>Public Data Links</div>

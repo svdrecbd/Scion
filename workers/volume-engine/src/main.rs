@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
+    extract::{Path as AxumPath, Query, Request, State},
+    http::{header, HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -26,6 +27,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 static CUSTOM_DATASETS: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const VOLUME_ENGINE_TOKEN_HEADER: &str = "x-caos-volume-token";
 fn get_custom_datasets() -> &'static Mutex<Vec<serde_json::Value>> {
     CUSTOM_DATASETS.get_or_init(|| Mutex::new(load_custom_dataset_registry()))
 }
@@ -41,6 +43,41 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     index_jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
     index_batch_runs: Arc<Mutex<BTreeMap<String, IndexBatchRunRecord>>>,
+}
+
+#[derive(Clone)]
+struct VolumeEngineAuth {
+    token: Option<String>,
+}
+
+fn volume_engine_request_authorized(expected: Option<&str>, provided: Option<&str>) -> bool {
+    match expected {
+        None => true,
+        Some(expected) => provided
+            .map(|provided| provided.as_bytes() == expected.as_bytes())
+            .unwrap_or(false),
+    }
+}
+
+async fn require_volume_engine_auth(
+    State(auth): State<VolumeEngineAuth>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::OPTIONS {
+        return next.run(request).await;
+    }
+    let provided = request
+        .headers()
+        .get(VOLUME_ENGINE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if volume_engine_request_authorized(auth.token.as_deref(), provided) {
+        return next.run(request).await;
+    }
+    json_response(
+        StatusCode::UNAUTHORIZED,
+        serde_json::json!({ "error": "Volume engine authentication is required." }),
+    )
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -5150,6 +5187,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn volume_engine_auth_requires_the_packaged_sidecar_token() {
+        assert!(volume_engine_request_authorized(None, None));
+        assert!(volume_engine_request_authorized(
+            Some("secret"),
+            Some("secret")
+        ));
+        assert!(!volume_engine_request_authorized(Some("secret"), None));
+        assert!(!volume_engine_request_authorized(
+            Some("secret"),
+            Some("wrong")
+        ));
+    }
+
     fn fixture_queue() -> Value {
         json!({
             "root": "/tmp/scion-public-data",
@@ -5379,6 +5430,17 @@ async fn main() {
         index_jobs: Arc::new(Mutex::new(BTreeMap::new())),
         index_batch_runs: Arc::new(Mutex::new(load_index_batch_runs())),
     };
+    let auth = VolumeEngineAuth {
+        token: std::env::var("CELL_ANATOMY_VOLUME_ENGINE_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    };
+    if auth.token.is_some() {
+        println!("Volume engine loopback authentication enabled");
+    } else {
+        println!("Volume engine loopback authentication disabled for standalone development");
+    }
 
     let app = Router::new()
         .route("/api/health", get(handle_health))
@@ -5444,6 +5506,10 @@ async fn main() {
         .route("/api/datasets/:dataset_id/similar", get(handle_get_similar))
         .route("/api/datasets/compare", axum::routing::post(handle_compare))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            auth,
+            require_volume_engine_auth,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

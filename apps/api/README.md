@@ -10,6 +10,7 @@ FastAPI backend for the Scion MVP.
 - compare mode
 - email-code account sessions
 - Workbench device pairing
+- versioned Atlas-to-CAOS dataset handoffs with deterministic record fingerprints
 - future curation and ingestion APIs
 
 ## Run locally

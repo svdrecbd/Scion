@@ -9,6 +9,7 @@ Next.js front end for the Cell Anatomy MVP.
 - show compare results
 - make the corpus feel browsable and intelligible
 - manage email-code account sessions and Workbench pairing approval
+- export versioned, metadata-only Atlas-to-CAOS handoff files from dataset records
 
 ## Run locally
 

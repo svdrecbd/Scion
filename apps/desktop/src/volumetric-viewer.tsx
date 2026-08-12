@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useMemo } from "react";
+import { fetchVolumeEngine } from "./volume-client";
 
 type CachedSlice = {
   buffer: ArrayBuffer;
@@ -145,7 +146,7 @@ const fetchSlicePayload = async (
     return { ...cached, fromCache: true };
   }
 
-  const res = await fetch(getSliceUrl(dataset, asset, axis, slice), { signal });
+  const res = await fetchVolumeEngine(getSliceUrl(dataset, asset, axis, slice), { signal });
   if (!res.ok) {
     throw new Error(`Volumetric sidecar returned status: ${res.status}`);
   }
@@ -742,7 +743,7 @@ export function VolumetricViewer({
           dataset
         )}&asset=${encodeURIComponent(asset)}&downsample=${downsample}`;
 
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await fetchVolumeEngine(url, { signal: controller.signal });
         if (!res.ok) {
           throw new Error(`Volumetric sidecar returned status: ${res.status}`);
         }

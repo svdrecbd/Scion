@@ -24,6 +24,14 @@ use tauri_plugin_shell::ShellExt;
 type SidecarChildSlot = Arc<Mutex<Option<CommandChild>>>;
 const PRIVATE_REGISTRY_SQLITE_INDEX_VERSION: i64 = 1;
 
+#[derive(Clone)]
+struct VolumeEngineAuthToken(String);
+
+#[tauri::command]
+fn get_volume_engine_auth_token(token: tauri::State<'_, VolumeEngineAuthToken>) -> String {
+    token.0.clone()
+}
+
 #[tauri::command]
 fn select_local_directory() -> Option<String> {
     rfd::FileDialog::new()
@@ -33,6 +41,12 @@ fn select_local_directory() -> Option<String> {
 
 #[derive(Serialize)]
 struct CaosProjectFile {
+    path: String,
+    contents: String,
+}
+
+#[derive(Serialize)]
+struct CaosHandoffFile {
     path: String,
     contents: String,
 }
@@ -168,6 +182,15 @@ fn read_project_file(path: PathBuf) -> Result<CaosProjectFile, String> {
     let contents = fs::read_to_string(&path)
         .map_err(|error| format!("Could not read CAOS project file: {}", error))?;
     Ok(CaosProjectFile {
+        path: path.to_string_lossy().into_owned(),
+        contents,
+    })
+}
+
+fn read_handoff_file(path: PathBuf) -> Result<CaosHandoffFile, String> {
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read Atlas handoff file: {}", error))?;
+    Ok(CaosHandoffFile {
         path: path.to_string_lossy().into_owned(),
         contents,
     })
@@ -926,6 +949,15 @@ fn open_caos_project_file() -> Result<Option<CaosProjectFile>, String> {
 }
 
 #[tauri::command]
+fn open_caos_handoff_file() -> Result<Option<CaosHandoffFile>, String> {
+    let path = rfd::FileDialog::new()
+        .add_filter("CAOS Atlas Handoff", &["json", "caos-handoff"])
+        .set_file_name("dataset.caos-handoff.json")
+        .pick_file();
+    path.map(read_handoff_file).transpose()
+}
+
+#[tauri::command]
 fn open_private_registry_file() -> Result<Option<PrivateRegistryFile>, String> {
     let path = rfd::FileDialog::new()
         .add_filter("CAOS Private Registry", &["json"])
@@ -1201,6 +1233,7 @@ fn build_native_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Res
                 "Open CAOS Project...",
                 Some("CmdOrCtrl+Shift+O"),
             )?,
+            &menu_item(app, "open-caos-handoff", "Open Atlas Handoff...", None)?,
             &menu_item(
                 app,
                 "open-private-registry",
@@ -1364,11 +1397,15 @@ fn spawn_volume_engine_supervisor<R: tauri::Runtime + 'static>(
     app: tauri::AppHandle<R>,
     child_slot: SidecarChildSlot,
     shutdown: Arc<AtomicBool>,
+    auth_token: String,
 ) {
     tauri::async_runtime::spawn(async move {
         while !shutdown.load(Ordering::SeqCst) {
             match app.shell().sidecar("volume-engine") {
-                Ok(sidecar) => match sidecar.spawn() {
+                Ok(sidecar) => match sidecar
+                    .env("CELL_ANATOMY_VOLUME_ENGINE_TOKEN", &auth_token)
+                    .spawn()
+                {
                     Ok((mut rx, child)) => {
                         let pid = child.pid();
                         println!(
@@ -1438,12 +1475,16 @@ pub fn run() {
     let sidecar_shutdown = Arc::new(AtomicBool::new(false));
     let setup_sidecar_child = Arc::clone(&sidecar_child);
     let setup_sidecar_shutdown = Arc::clone(&sidecar_shutdown);
+    let volume_engine_auth_token = uuid::Uuid::new_v4().simple().to_string();
+    let setup_volume_engine_auth_token = volume_engine_auth_token.clone();
 
     let app = tauri::Builder::default()
+        .manage(VolumeEngineAuthToken(volume_engine_auth_token))
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             select_local_directory,
             open_caos_project_file,
+            open_caos_handoff_file,
             open_private_registry_file,
             open_private_registry_index_file,
             open_private_workset_file,
@@ -1451,7 +1492,8 @@ pub fn run() {
             read_caos_project_file,
             save_caos_project_file,
             save_view_snapshot_files,
-            confirm_discard_project_changes
+            confirm_discard_project_changes,
+            get_volume_engine_auth_token
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1473,6 +1515,7 @@ pub fn run() {
                 handle,
                 Arc::clone(&setup_sidecar_child),
                 Arc::clone(&setup_sidecar_shutdown),
+                setup_volume_engine_auth_token.clone(),
             );
 
             Ok(())

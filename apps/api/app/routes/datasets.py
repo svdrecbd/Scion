@@ -1,9 +1,10 @@
 import csv
 import io
 import logging
+import re
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
@@ -15,12 +16,14 @@ from app.repositories import DatasetRepository
 from app.schemas import (
     CompareRequest,
     CompareResponse,
+    CaosHandoff,
     DatasetRecord,
     FacetResponse,
     FacetValue,
     SearchResponse,
 )
 from app.services.compare import build_compare_response
+from app.services.caos_handoff import build_caos_handoff
 from app.services.plan import PlanAnalysis, analyze_experiment_plan
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -928,6 +931,32 @@ def get_similar_datasets(
         returned_count=len(response),
     )
     return response
+
+
+@router.get("/{dataset_id}/caos-handoff", response_model=CaosHandoff)
+def get_caos_handoff(
+    dataset_id: str,
+    response: Response,
+    repository: DatasetRepository = Depends(get_dataset_repository),
+) -> CaosHandoff:
+    started_at = perf_counter()
+    dataset = repository.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", dataset.dataset_id).strip("-") or "dataset"
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="{safe_id}.caos-handoff.json"'
+    )
+    response.headers["Cache-Control"] = "no-store"
+    handoff = build_caos_handoff(dataset)
+    _log_route_timing(
+        "datasets.caos_handoff",
+        started_at,
+        dataset_id=dataset_id,
+        candidate_count=len(handoff.asset_candidates),
+    )
+    return handoff
 
 
 @router.get("/{dataset_id}")

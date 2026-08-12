@@ -52,6 +52,51 @@ class DatasetRecord(BaseModel):
     included_status: str = "included"
 
 
+class CaosHandoffAssetCandidate(BaseModel):
+    source: Literal["public_locator"] = "public_locator"
+    locator_url: str
+    repository: str | None = None
+    accession: str | None = None
+    availability: Literal["indexed", "unknown"] = "indexed"
+
+
+class CaosHandoffProjectSeed(BaseModel):
+    name: str
+    note: str
+    intended_operations: list[
+        Literal["inspect", "compare", "measure", "annotate", "convert", "review"]
+    ]
+
+
+class CaosHandoffRequirements(BaseModel):
+    local_data_required: bool = True
+    raw_data_included: bool = False
+    automatic_download_allowed: bool = False
+    minimum_workbench_schema_version: int = 1
+
+
+class CaosHandoffIntegrity(BaseModel):
+    algorithm: Literal["sha256"] = "sha256"
+    dataset_fingerprint: str
+    generated_by: Literal["cell-anatomy-api"] = "cell-anatomy-api"
+
+
+class CaosHandoff(BaseModel):
+    schema_name: Literal["cell-anatomy-caos-handoff"] = Field(
+        default="cell-anatomy-caos-handoff",
+        alias="schema",
+    )
+    schema_version: Literal[1] = 1
+    generated_at: datetime
+    intent: Literal["inspect_dataset"] = "inspect_dataset"
+    atlas: dict[str, str]
+    dataset: DatasetRecord
+    asset_candidates: list[CaosHandoffAssetCandidate]
+    project_seed: CaosHandoffProjectSeed
+    requirements: CaosHandoffRequirements
+    integrity: CaosHandoffIntegrity
+
+
 class SearchResponse(BaseModel):
     total: int
     results: list[DatasetRecord]

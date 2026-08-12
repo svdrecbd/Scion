@@ -37,7 +37,17 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Install API dependencies
         working-directory: apps/api
@@ -49,14 +59,31 @@ jobs:
         working-directory: apps/web
         run: npm ci
 
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
       - name: Run API tests
         run: make test-api
+
+      - name: Run ingestion tests
+        run: make test-ingestion
 
       - name: Run web typecheck
         run: make web-typecheck
 
       - name: Run web build
         run: make web-build
+
+      - name: Run desktop checks
+        run: make desktop-typecheck desktop-test-caos desktop-build desktop-tauri-check
+
+      - name: Run volume engine checks
+        run: make volume-engine-check volume-engine-test
+
+      - name: Build packaged volume engine sidecar
+        working-directory: apps/desktop
+        run: npm run sidecar:build
 
       - name: Run stack smoke test
         run: make smoke-web

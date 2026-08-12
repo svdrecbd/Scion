@@ -13,6 +13,13 @@ import {
   type CaosArchiveStatus,
 } from "./caos-project";
 import {
+  parseCaosHandoff,
+  resolveCaosHandoffDataset,
+  verifyCaosHandoffIntegrity,
+  type CaosHandoff,
+  type CaosHandoffResolution,
+} from "./caos-handoff";
+import {
   buildPrivateRegistryProjectSeed,
   parsePrivateRegistryAssetsJsonl,
   parsePrivateArchiveRegistryBundle,
@@ -26,6 +33,7 @@ import {
   type PrivateWorksetSummary,
 } from "./private-registry";
 import { MeasurementOverlay, OrthogonalViewer, RoiOverlay, VolumetricViewer, VoxelPoint } from "./volumetric-viewer";
+import { fetchVolumeEngine } from "./volume-client";
 
 type CompatibilityReport = {
   status: string;
@@ -101,6 +109,11 @@ type RecentCaosProject = {
 };
 
 type NativeCaosProjectFile = {
+  path: string;
+  contents: string;
+};
+
+type NativeCaosHandoffFile = {
   path: string;
   contents: string;
 };
@@ -498,6 +511,7 @@ const DEVICE_TOKEN_STORAGE_KEY = "cellAnatomyWorkbenchDeviceToken";
 const RECENT_LOCAL_DATASETS_STORAGE_KEY = "cellAnatomyWorkbenchRecentLocalDatasets";
 const RECENT_CAOS_PROJECTS_STORAGE_KEY = "cellAnatomyWorkbenchRecentCaosProjects";
 const LAST_CAOS_PROJECT_PATH_STORAGE_KEY = "cellAnatomyWorkbenchLastCaosProjectPath";
+const ACTIVE_CAOS_HANDOFF_STORAGE_KEY = "cellAnatomyWorkbenchActiveAtlasHandoff";
 const WORKBENCH_SESSIONS_STORAGE_KEY = "cellAnatomyWorkbenchSessions";
 const WORKBENCH_DRAFT_NOTE_STORAGE_KEY = "cellAnatomyWorkbenchDraftNote";
 const WORKBENCH_MEASUREMENTS_STORAGE_KEY = "cellAnatomyWorkbenchMeasurements";
@@ -612,6 +626,17 @@ const removeStoredValue = (key: string) => {
     window.localStorage.removeItem(key);
   } catch {
     // Local persistence is helpful but should never block viewing data.
+  }
+};
+
+const readStoredCaosHandoff = (): CaosHandoff | null => {
+  const value = readStoredString(ACTIVE_CAOS_HANDOFF_STORAGE_KEY);
+  if (!value) return null;
+  try {
+    return parseCaosHandoff(value);
+  } catch {
+    removeStoredValue(ACTIVE_CAOS_HANDOFF_STORAGE_KEY);
+    return null;
   }
 };
 
@@ -1086,7 +1111,7 @@ async function volumeJson<T>(path: string, init?: RequestInit, timeoutMs = 10000
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`http://127.0.0.1:8080${path}`, {
+    const response = await fetchVolumeEngine(path, {
       ...init,
       signal: init?.signal || controller.signal,
       headers: {
@@ -1150,6 +1175,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [currentProjectNotes, setCurrentProjectNotes] = useState<CaosProjectNote[]>([]);
   const [currentProjectExports, setCurrentProjectExports] = useState<unknown[]>([]);
   const [savedCaosProjectSignature, setSavedCaosProjectSignature] = useState<string | null>(null);
+  const [activeAtlasHandoff, setActiveAtlasHandoff] = useState<CaosHandoff | null>(() => readStoredCaosHandoff());
+  const [activeAtlasHandoffPath, setActiveAtlasHandoffPath] = useState<string | null>(null);
+  const [atlasHandoffStatus, setAtlasHandoffStatus] = useState<string | null>(null);
+  const [atlasHandoffError, setAtlasHandoffError] = useState<string | null>(null);
   const initialProjectSignatureRef = useRef(false);
   const restoredLastProjectRef = useRef(false);
   const [savedSessions, setSavedSessions] = useState<WorkbenchSessionSnapshot[]>(() =>
@@ -1178,6 +1207,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     readStoredArray<LocalJobRecord>(WORKBENCH_JOBS_STORAGE_KEY)
   );
   const caosProjectInputRef = useRef<HTMLInputElement | null>(null);
+  const caosHandoffInputRef = useRef<HTMLInputElement | null>(null);
   const nativeCommandHandlerRef = useRef<(command: string) => void>(() => {});
   const [indexQueue, setIndexQueue] = useState<IndexQueueResponse | null>(null);
   const [indexQueueLoading, setIndexQueueLoading] = useState(false);
@@ -1249,6 +1279,40 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   useEffect(() => {
     writeStoredString(WORKBENCH_MIRROR_MODE_STORAGE_KEY, mirrorMode ? "true" : "false");
   }, [mirrorMode]);
+
+  useEffect(() => {
+    if (activeAtlasHandoff) {
+      writeStoredString(ACTIVE_CAOS_HANDOFF_STORAGE_KEY, JSON.stringify(activeAtlasHandoff));
+    } else {
+      removeStoredValue(ACTIVE_CAOS_HANDOFF_STORAGE_KEY);
+    }
+  }, [activeAtlasHandoff]);
+
+  useEffect(() => {
+    if (!activeAtlasHandoff) return;
+    let cancelled = false;
+    verifyCaosHandoffIntegrity(activeAtlasHandoff)
+      .then((valid) => {
+        if (cancelled || valid) return;
+        setActiveAtlasHandoff(null);
+        setActiveAtlasHandoffPath(null);
+        setAtlasHandoffStatus(null);
+        setAtlasHandoffError("Stored Atlas handoff fingerprint verification failed and the context was removed.");
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAtlasHandoffError(error instanceof Error ? error.message : "Could not verify stored Atlas handoff.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAtlasHandoff]);
+
+  const atlasHandoffResolution: CaosHandoffResolution<PackagedDataset> | null = useMemo(
+    () => activeAtlasHandoff ? resolveCaosHandoffDataset(activeAtlasHandoff, localDatasets) : null,
+    [activeAtlasHandoff, localDatasets],
+  );
 
   useEffect(() => {
     if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
@@ -1445,8 +1509,8 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     setPlanningLoading(true);
     setPlanningError(null);
     try {
-      const url = `http://127.0.0.1:8080/api/datasets/analytics/plan?organelles=${encodeURIComponent(planningOrganelles)}&res=${planningRes}&ss=${planningSample}&cell_type=${encodeURIComponent(planningCellType)}`;
-      const res = await fetch(url);
+      const url = `/api/datasets/analytics/plan?organelles=${encodeURIComponent(planningOrganelles)}&res=${planningRes}&ss=${planningSample}&cell_type=${encodeURIComponent(planningCellType)}`;
+      const res = await fetchVolumeEngine(url);
       if (!res.ok) {
         throw new Error(`Plan API error: ${res.status}`);
       }
@@ -1541,6 +1605,74 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       colormap: 0,
       logScale: false,
     });
+  };
+
+  const applyAtlasHandoff = async (contents: string, path: string | null = null) => {
+    setAtlasHandoffError(null);
+    setAtlasHandoffStatus("Verifying Atlas handoff...");
+    try {
+      const handoff = parseCaosHandoff(contents);
+      if (!(await verifyCaosHandoffIntegrity(handoff))) {
+        throw new Error("Atlas handoff fingerprint verification failed. The record may have changed or been edited.");
+      }
+      if (handoff.requirements.raw_data_included || handoff.requirements.automatic_download_allowed) {
+        throw new Error("This Workbench only accepts metadata-only handoffs that do not authorize automatic data download.");
+      }
+
+      setActiveAtlasHandoff(handoff);
+      setActiveAtlasHandoffPath(path);
+      const resolution = resolveCaosHandoffDataset(handoff, localDatasets);
+      if (resolution.status === "ready") {
+        const derivative = resolution.dataset.derivatives[0];
+        focusDatasetDerivative(resolution.dataset.slug, derivative);
+        setActiveTab("telemetry");
+        setAtlasHandoffStatus(
+          `Verified Atlas handoff and opened ${resolution.dataset.slug} by ${resolution.matchedBy}.`,
+        );
+      } else {
+        setActiveTab("image-notes");
+        setAtlasHandoffStatus(resolution.summary);
+      }
+    } catch (error) {
+      setAtlasHandoffError(error instanceof Error ? error.message : "Could not import Atlas handoff.");
+      setAtlasHandoffStatus(null);
+    }
+  };
+
+  const openAtlasHandoffNative = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const file = await invoke<NativeCaosHandoffFile | null>("open_caos_handoff_file");
+      if (file) await applyAtlasHandoff(file.contents, file.path);
+    } catch (error) {
+      setAtlasHandoffError(error instanceof Error ? error.message : "Could not open Atlas handoff.");
+    }
+  };
+
+  const importAtlasHandoff = async (file: File | null) => {
+    if (!file) return;
+    try {
+      await applyAtlasHandoff(await file.text(), null);
+    } finally {
+      if (caosHandoffInputRef.current) caosHandoffInputRef.current.value = "";
+    }
+  };
+
+  const openMatchedAtlasHandoffDataset = () => {
+    if (!atlasHandoffResolution || atlasHandoffResolution.status !== "ready") return;
+    focusDatasetDerivative(
+      atlasHandoffResolution.dataset.slug,
+      atlasHandoffResolution.dataset.derivatives[0],
+    );
+    setActiveTab("telemetry");
+    setAtlasHandoffStatus(`Opened the loaded match for ${activeAtlasHandoff?.dataset.title || "Atlas handoff"}.`);
+  };
+
+  const clearAtlasHandoff = () => {
+    setActiveAtlasHandoff(null);
+    setActiveAtlasHandoffPath(null);
+    setAtlasHandoffStatus("Atlas handoff context cleared.");
+    setAtlasHandoffError(null);
   };
 
   const resolveLoadedDerivativeForRegistryAsset = (asset: PrivateRegistryAsset) =>
@@ -3807,6 +3939,13 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       savedSessions,
       importStatus,
       projectRecoveryStatus,
+      atlasHandoff: activeAtlasHandoff
+        ? {
+            path: activeAtlasHandoffPath,
+            handoff: activeAtlasHandoff,
+            resolution: atlasHandoffResolution?.status || "pending",
+          }
+        : null,
       localOpenReport,
       indexBatchPlan: indexBatchPlan
         ? {
@@ -4154,6 +4293,9 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         break;
       case "open-caos":
         void openCaosProjectNative();
+        break;
+      case "open-caos-handoff":
+        void openAtlasHandoffNative();
         break;
       case "save-caos":
         void saveCaosProjectNative(false);
@@ -5583,6 +5725,99 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 Workbench Session
               </span>
               <div style={{ display: "grid", gap: 8, fontSize: 11.5, fontFamily: "var(--font-display)", background: "rgba(0,0,0,0.1)", padding: "10px 12px", border: "1px solid var(--border)" }}>
+                <div style={{ display: "grid", gap: 7, border: "1px solid var(--border)", background: "var(--field-background)", padding: "8px 9px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                    <span className="muted" style={{ textTransform: "uppercase", fontSize: 9, fontWeight: 700 }}>
+                      Atlas Handoff
+                    </span>
+                    <strong
+                      style={{
+                        color: atlasHandoffResolution?.status === "ready" ? "var(--atlas-blue-dark)" : activeAtlasHandoff ? "var(--atlas-orange)" : "var(--accent-foreground)",
+                        textTransform: "uppercase",
+                        fontSize: 9,
+                      }}
+                    >
+                      {atlasHandoffResolution?.status || "None"}
+                    </strong>
+                  </div>
+                  {activeAtlasHandoff ? (
+                    <>
+                      <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+                        <strong style={{ fontSize: 10.5, lineHeight: 1.35 }}>
+                          {activeAtlasHandoff.dataset.title}
+                        </strong>
+                        <span className="muted" style={{ fontSize: 9.5, lineHeight: 1.35 }}>
+                          {activeAtlasHandoff.dataset.cell_type} | {activeAtlasHandoff.dataset.modality} | {activeAtlasHandoff.dataset.year}
+                        </span>
+                        <span className="muted" title={activeAtlasHandoffPath || undefined} style={{ fontSize: 9, overflowWrap: "anywhere" }}>
+                          {activeAtlasHandoffPath ? formatPathBasename(activeAtlasHandoffPath) : activeAtlasHandoff.dataset.dataset_id}
+                        </span>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                        {atlasHandoffResolution?.status === "ready" ? (
+                          <button type="button" className="button" onClick={openMatchedAtlasHandoffDataset} style={{ padding: "5px 7px", fontSize: 9.5 }}>
+                            Open Match
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button"
+                            onClick={() => isTauri ? void handleOpenLocalDirectory() : undefined}
+                            disabled={!isTauri}
+                            style={{ padding: "5px 7px", fontSize: 9.5 }}
+                          >
+                            Open Local Data
+                          </button>
+                        )}
+                        <button type="button" className="button" onClick={clearAtlasHandoff} style={{ padding: "5px 7px", fontSize: 9.5 }}>
+                          Clear
+                        </button>
+                      </div>
+                      {activeAtlasHandoff.asset_candidates.length > 0 ? (
+                        <div style={{ display: "grid", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+                          {activeAtlasHandoff.asset_candidates.slice(0, 3).map((candidate) => (
+                            <a
+                              key={candidate.locator_url}
+                              href={candidate.locator_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="muted"
+                              style={{ fontSize: 9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            >
+                              {candidate.repository || "Repository"}{candidate.accession ? ` ${candidate.accession}` : ""}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => isTauri ? void openAtlasHandoffNative() : caosHandoffInputRef.current?.click()}
+                      style={{ padding: "6px 8px", fontSize: 9.5 }}
+                    >
+                      Open Atlas Handoff
+                    </button>
+                  )}
+                  {atlasHandoffStatus ? (
+                    <div style={{ color: "var(--atlas-blue-dark)", fontSize: 9.5, lineHeight: 1.35 }}>
+                      {atlasHandoffStatus}
+                    </div>
+                  ) : null}
+                  {atlasHandoffError ? (
+                    <div style={{ color: "var(--atlas-orange)", fontSize: 9.5, lineHeight: 1.35 }}>
+                      {atlasHandoffError}
+                    </div>
+                  ) : null}
+                </div>
+                <input
+                  ref={caosHandoffInputRef}
+                  type="file"
+                  accept="application/json,.json,.caos-handoff"
+                  onChange={(event) => void importAtlasHandoff(event.target.files?.[0] || null)}
+                  style={{ display: "none" }}
+                />
                 {isTauri ? (
                   <div style={{ display: "grid", gap: 7, border: "1px solid var(--border)", background: "var(--field-background)", padding: "8px 9px" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>

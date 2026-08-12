@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useState, type DragEvent } from "react";
 import { WorkbenchLogo } from "./brand";
 import { WorkbenchClient, type PackagedDataset } from "./workbench-client";
+import { fetchVolumeEngine } from "./volume-client";
 
 function CockpitHeader({
   status,
@@ -30,7 +31,9 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 8000): Promise<T
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = url.startsWith("http://127.0.0.1:8080")
+      ? await fetchVolumeEngine(url, { signal: controller.signal })
+      : await fetch(url, { signal: controller.signal });
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
       throw new Error(payload?.error || payload?.detail || `Data runtime responded with status: ${response.status}`);

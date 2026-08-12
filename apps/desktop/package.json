@@ -7,7 +7,8 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test:caos": "node scripts/test-caos-project.mjs && node scripts/test-private-registry.mjs",
+    "test:caos": "node scripts/test-caos-project.mjs && node scripts/test-private-registry.mjs && node scripts/test-caos-handoff.mjs",
+    "sidecar:build": "bash scripts/build-volume-engine-sidecar.sh",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
