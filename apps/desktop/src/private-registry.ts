@@ -1,5 +1,7 @@
 export const PRIVATE_REGISTRY_SCHEMA = "cell-anatomy-private-archive-registry";
 export const PRIVATE_REGISTRY_ASSET_SCHEMA = "cell-anatomy-private-archive-asset";
+export const PRIVATE_WORKSET_SCHEMA = "cell-anatomy-archive-workset";
+export const PRIVATE_WORKSET_ASSET_SCHEMA = "cell-anatomy-archive-workset-asset";
 export const PRIVATE_REGISTRY_SCHEMA_VERSION = 1;
 
 export type PrivateRegistryAllowedOperations = {
@@ -135,10 +137,127 @@ export type PrivateArchiveRegistryIndex = {
   conversionQueueAssets: PrivateRegistryAsset[];
 };
 
+export type PrivateWorksetSummary = {
+  schema: typeof PRIVATE_WORKSET_SCHEMA;
+  schema_version: typeof PRIVATE_REGISTRY_SCHEMA_VERSION;
+  workset_builder: string;
+  generated_at: string;
+  workset_id: string;
+  title: string;
+  source_registry: {
+    registry_dir: string;
+    registry_id: string;
+    archive_id: string;
+    archive_root: string;
+    asset_count?: number;
+  };
+  selection: {
+    asset_ids: string[];
+    path_prefixes: string[];
+    queries: string[];
+    all_assets: boolean;
+    volume_candidates_only: boolean;
+    limit?: number | null;
+  };
+  promotion_rule: {
+    selected_asset_count: number;
+    selected_assets_artifact: string;
+    selected_assets_preview: Array<Record<string, string>>;
+    intended_operations: string[];
+    destination_workset_dir: string;
+    notes: string[];
+  };
+  summary: {
+    selected_asset_count: number;
+    selected_bytes_total: number;
+    checksum_record_count: number;
+    metadata_ready_count: number;
+    conversion_ready_count: number;
+    project_ready_count: number;
+    dataset_mode_ready_count: number;
+    rights_status_counts: Record<string, number>;
+    triage_status_counts: Record<string, number>;
+    publication_status_counts: Record<string, number>;
+    format_counts: Record<string, number>;
+    blocker_counts: Record<string, number>;
+    blocked_operation_counts: Record<string, number>;
+  };
+  findings: Array<{ severity: string; code: string; summary: string }>;
+  output_dir: string;
+};
+
+export type PrivateWorksetIndex = {
+  workset: PrivateWorksetSummary;
+  registry: PrivateArchiveRegistryIndex;
+};
+
+export type PrivateRegistryLoadedDerivative = {
+  source_relative_path: string;
+  source_local_path?: string;
+  source_sha256?: string;
+  source_size_bytes?: number;
+  output_path?: string;
+  archiveStatus?: {
+    registryId?: string;
+    assetId?: string;
+    archiveId?: string;
+    relativePath?: string;
+  };
+};
+
+export type PrivateRegistryLoadedDataset<
+  Derivative extends PrivateRegistryLoadedDerivative = PrivateRegistryLoadedDerivative,
+> = {
+  slug: string;
+  derivatives: Derivative[];
+};
+
+export type PrivateRegistryProjectAssetResolution<
+  Dataset extends PrivateRegistryLoadedDataset = PrivateRegistryLoadedDataset,
+> =
+  | {
+      status: "ready";
+      dataset: Dataset;
+      derivative: Dataset["derivatives"][number];
+      matchedBy: "archive-identity" | "checksum" | "local-path" | "relative-path";
+    }
+  | {
+      status: "blocked" | "not-loaded" | "ambiguous";
+      summary: string;
+    };
+
+export type PrivateRegistryProjectSeed = {
+  name: string;
+  note: string;
+  archiveStatus: {
+    registryId: string;
+    assetId: string;
+    archiveId: string;
+    relativePath: string;
+    assetStatus: string;
+    fixityStatus: string;
+    publicationStatus: string;
+    triageStatus: string;
+    rightsStatus: string;
+    classificationStatus: string;
+    reviewRequired: boolean;
+    blockers: string[];
+    metadataGapCodes: string[];
+    allowedOperations: Record<string, boolean>;
+    worksetId?: string;
+    worksetTitle?: string;
+  };
+};
+
 export type PrivateRegistryBundleInput = {
   summaryContents: string;
   assetsContents: string;
   searchContents?: string | null;
+};
+
+export type PrivateWorksetBundleInput = {
+  worksetContents: string;
+  assetsContents: string;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -190,6 +309,18 @@ const requireStringArray = (value: unknown, path: string): string[] => {
 const optionalString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
+const stringValue = (value: unknown, fallback = ""): string =>
+  typeof value === "string" ? value : fallback;
+
+const booleanValue = (value: unknown, fallback = false): boolean =>
+  typeof value === "boolean" ? value : fallback;
+
+const stringArrayValue = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+const numberValue = (value: unknown, fallback = 0): number =>
+  typeof value === "number" && Number.isFinite(value) ? value : fallback;
+
 const parseJson = (text: string, label: string): unknown => {
   try {
     return JSON.parse(text);
@@ -237,6 +368,18 @@ const validateDimensions = (value: unknown, path: string): Record<string, number
 const validateVoxelSize = (value: unknown, path: string): Record<string, number | string> | null => {
   if (value == null) return null;
   return validateDimensions(value, path);
+};
+
+const optionalRecord = (value: unknown): Record<string, unknown> =>
+  isRecord(value) ? value : {};
+
+const validateNumberRecord = (value: unknown, path: string): Record<string, number> => {
+  const record = requireObject(value, path);
+  const result: Record<string, number> = {};
+  for (const [key, item] of Object.entries(record)) {
+    result[key] = requireNumber(item, `${path}.${key}`);
+  }
+  return result;
 };
 
 export const validatePrivateRegistrySummary = (value: unknown): PrivateRegistrySummary => {
@@ -406,6 +549,291 @@ export const parsePrivateRegistrySearchJsonl = (text: string): PrivateRegistrySe
     validatePrivateRegistrySearchEntry(value, `search[${index}]`)
   );
 
+export const validatePrivateWorksetSummary = (value: unknown): PrivateWorksetSummary => {
+  const workset = requireObject(value, "workset.json");
+  if (workset.schema !== PRIVATE_WORKSET_SCHEMA) {
+    throw new Error(`Unsupported workset schema: ${String(workset.schema || "missing")}.`);
+  }
+  if (workset.schema_version !== PRIVATE_REGISTRY_SCHEMA_VERSION) {
+    throw new Error(`Unsupported workset schema version: ${String(workset.schema_version)}.`);
+  }
+  const sourceRegistry = requireObject(workset.source_registry, "source_registry");
+  const selection = requireObject(workset.selection, "selection");
+  const promotionRule = requireObject(workset.promotion_rule, "promotion_rule");
+  const summary = requireObject(workset.summary, "summary");
+  return {
+    schema: PRIVATE_WORKSET_SCHEMA,
+    schema_version: PRIVATE_REGISTRY_SCHEMA_VERSION,
+    workset_builder: requireNonEmptyString(workset.workset_builder, "workset_builder"),
+    generated_at: requireNonEmptyString(workset.generated_at, "generated_at"),
+    workset_id: requireNonEmptyString(workset.workset_id, "workset_id"),
+    title: requireString(workset.title, "title"),
+    source_registry: {
+      registry_dir: requireString(sourceRegistry.registry_dir, "source_registry.registry_dir"),
+      registry_id: requireString(sourceRegistry.registry_id, "source_registry.registry_id"),
+      archive_id: requireString(sourceRegistry.archive_id, "source_registry.archive_id"),
+      archive_root: requireString(sourceRegistry.archive_root, "source_registry.archive_root"),
+      asset_count: typeof sourceRegistry.asset_count === "number" ? sourceRegistry.asset_count : undefined,
+    },
+    selection: {
+      asset_ids: requireStringArray(selection.asset_ids, "selection.asset_ids"),
+      path_prefixes: requireStringArray(selection.path_prefixes, "selection.path_prefixes"),
+      queries: requireStringArray(selection.queries, "selection.queries"),
+      all_assets: requireBoolean(selection.all_assets, "selection.all_assets"),
+      volume_candidates_only: requireBoolean(selection.volume_candidates_only, "selection.volume_candidates_only"),
+      limit: typeof selection.limit === "number" || selection.limit === null ? selection.limit : undefined,
+    },
+    promotion_rule: {
+      selected_asset_count: requireNumber(promotionRule.selected_asset_count, "promotion_rule.selected_asset_count"),
+      selected_assets_artifact: requireString(
+        promotionRule.selected_assets_artifact,
+        "promotion_rule.selected_assets_artifact"
+      ),
+      selected_assets_preview: Array.isArray(promotionRule.selected_assets_preview)
+        ? promotionRule.selected_assets_preview.filter(isRecord).map((item) => item as Record<string, string>)
+        : [],
+      intended_operations: requireStringArray(promotionRule.intended_operations, "promotion_rule.intended_operations"),
+      destination_workset_dir: requireString(
+        promotionRule.destination_workset_dir,
+        "promotion_rule.destination_workset_dir"
+      ),
+      notes: requireStringArray(promotionRule.notes, "promotion_rule.notes"),
+    },
+    summary: {
+      selected_asset_count: requireNumber(summary.selected_asset_count, "summary.selected_asset_count"),
+      selected_bytes_total: requireNumber(summary.selected_bytes_total, "summary.selected_bytes_total"),
+      checksum_record_count: requireNumber(summary.checksum_record_count, "summary.checksum_record_count"),
+      metadata_ready_count: requireNumber(summary.metadata_ready_count, "summary.metadata_ready_count"),
+      conversion_ready_count: requireNumber(summary.conversion_ready_count, "summary.conversion_ready_count"),
+      project_ready_count: requireNumber(summary.project_ready_count, "summary.project_ready_count"),
+      dataset_mode_ready_count: requireNumber(
+        summary.dataset_mode_ready_count,
+        "summary.dataset_mode_ready_count"
+      ),
+      rights_status_counts: validateNumberRecord(summary.rights_status_counts, "summary.rights_status_counts"),
+      triage_status_counts: validateNumberRecord(summary.triage_status_counts, "summary.triage_status_counts"),
+      publication_status_counts: validateNumberRecord(
+        summary.publication_status_counts,
+        "summary.publication_status_counts"
+      ),
+      format_counts: validateNumberRecord(summary.format_counts, "summary.format_counts"),
+      blocker_counts: validateNumberRecord(summary.blocker_counts, "summary.blocker_counts"),
+      blocked_operation_counts: validateNumberRecord(
+        summary.blocked_operation_counts,
+        "summary.blocked_operation_counts"
+      ),
+    },
+    findings: Array.isArray(workset.findings)
+      ? workset.findings.filter(isRecord).map((finding) => ({
+          severity: stringValue(finding.severity),
+          code: stringValue(finding.code),
+          summary: stringValue(finding.summary),
+        }))
+      : [],
+    output_dir: requireString(workset.output_dir, "output_dir"),
+  };
+};
+
+const extensionForPath = (relativePath: string) => {
+  const name = relativePath.toLowerCase().split("/").pop() || relativePath.toLowerCase();
+  if (name.endsWith(".ome.tif")) return ".ome.tif";
+  if (name.endsWith(".ome.tiff")) return ".ome.tiff";
+  if (name.endsWith(".nii.gz")) return ".nii.gz";
+  if (name.endsWith(".xml.gz")) return ".xml.gz";
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot) : "";
+};
+
+const normalizeWorksetAsset = (value: unknown, workset: PrivateWorksetSummary, index: number): PrivateRegistryAsset => {
+  const asset = requireObject(value, `workset-assets[${index}]`);
+  if (asset.schema !== PRIVATE_WORKSET_ASSET_SCHEMA) {
+    throw new Error(`workset-assets[${index}].schema must be ${PRIVATE_WORKSET_ASSET_SCHEMA}.`);
+  }
+  if (asset.schema_version !== PRIVATE_REGISTRY_SCHEMA_VERSION) {
+    throw new Error(`workset-assets[${index}].schema_version must be ${PRIVATE_REGISTRY_SCHEMA_VERSION}.`);
+  }
+  const relativePath = requireNonEmptyString(asset.relative_path, `workset-assets[${index}].relative_path`);
+  const source = optionalRecord(asset.source);
+  const checksum = optionalRecord(asset.checksum);
+  const metadata = optionalRecord(asset.metadata);
+  const status = optionalRecord(asset.status);
+  const readiness = optionalRecord(asset.readiness);
+  const review = optionalRecord(asset.review);
+  const operations = optionalRecord(status.allowed_operations);
+  const dimensions = optionalRecord(metadata.dimensions);
+  const blockerList = stringArrayValue(readiness.blockers);
+  const gapCodes = stringArrayValue(review.gap_codes);
+  const blockedOperations = stringArrayValue(optionalRecord(asset.promotion).blocked_operations);
+  const isCandidate = booleanValue(readiness.is_volume_candidate);
+  const reviewRequired =
+    blockerList.length > 0 ||
+    gapCodes.length > 0 ||
+    blockedOperations.length > 0 ||
+    stringValue(status.rights_status, "unknown") === "unknown";
+
+  return validatePrivateRegistryAsset(
+    {
+      schema: PRIVATE_REGISTRY_ASSET_SCHEMA,
+      schema_version: PRIVATE_REGISTRY_SCHEMA_VERSION,
+      registry_id: stringValue(asset.registry_id, workset.source_registry.registry_id || workset.workset_id),
+      asset_id: requireNonEmptyString(asset.asset_id, `workset-assets[${index}].asset_id`),
+      archive_id: stringValue(asset.archive_id, workset.source_registry.archive_id || "archive"),
+      relative_path: relativePath,
+      name: relativePath.split("/").pop() || relativePath,
+      path_type: requireNonEmptyString(asset.path_type, `workset-assets[${index}].path_type`),
+      extension: extensionForPath(relativePath),
+      likely_role: stringValue(asset.likely_role, "unknown") || "unknown",
+      size_bytes: numberValue(asset.size_bytes),
+      modified_at: stringValue(asset.promoted_at, workset.generated_at),
+      source: {
+        root: stringValue(source.root, workset.source_registry.archive_root),
+        relative_path: stringValue(source.relative_path, relativePath),
+        link_target: stringValue(source.link_target),
+      },
+      checksum: {
+        algorithm: stringValue(checksum.algorithm),
+        digest: stringValue(checksum.digest),
+        duplicate_of: stringValue(checksum.duplicate_of),
+        computed_at: stringValue(checksum.computed_at),
+        reused_from_previous_run: false,
+      },
+      metadata: {
+        status: stringValue(metadata.status, "not_extracted") || "not_extracted",
+        format: stringValue(metadata.format),
+        dimensions,
+        dtype: stringValue(metadata.dtype),
+        voxel_size_nm: metadata.voxel_size_nm ?? null,
+        metadata_source: stringValue(metadata.metadata_source),
+        source_metadata_path: stringValue(metadata.source_metadata_path),
+        warning: blockedOperations.length ? `Blocked operations: ${blockedOperations.join(", ")}` : undefined,
+      },
+      status: {
+        asset_status: stringValue(status.asset_status, "promoted") || "promoted",
+        fixity_status: stringValue(status.fixity_status, "unknown") || "unknown",
+        publication_status: stringValue(status.publication_status, "unknown") || "unknown",
+        triage_status: stringValue(status.triage_status, "unknown") || "unknown",
+        rights_status: stringValue(status.rights_status, "unknown") || "unknown",
+        classification_status: stringValue(status.classification_status, "unreviewed") || "unreviewed",
+        blocked_states: stringArrayValue(status.blocked_states),
+        review_required: reviewRequired,
+        review_notes: [
+          ...stringArrayValue(status.review_notes),
+          ...blockedOperations.map((operation) => `blocked_operation:${operation}`),
+        ],
+        allowed_operations: {
+          can_store_locally: booleanValue(operations.can_store_locally),
+          can_backup_to_cloud: booleanValue(operations.can_backup_to_cloud),
+          can_convert: booleanValue(operations.can_convert),
+          can_view_in_caos: booleanValue(operations.can_view_in_caos),
+          can_share_with_collaborators: booleanValue(operations.can_share_with_collaborators),
+          can_publish_derivatives: booleanValue(operations.can_publish_derivatives),
+          can_release_publicly: booleanValue(operations.can_release_publicly),
+        },
+      },
+      volume_candidate: {
+        is_candidate: isCandidate,
+        source_metadata_path: stringValue(metadata.source_metadata_path, relativePath),
+        candidate_status: isCandidate ? "promoted_workset_candidate" : "",
+      },
+      review: {
+        gap_count: numberValue(review.gap_count, gapCodes.length),
+        gap_codes: gapCodes,
+        gap_severities: stringArrayValue(review.gap_severities),
+        recommended_actions: stringArrayValue(review.recommended_actions),
+      },
+      readiness: {
+        metadata_ready: booleanValue(readiness.metadata_ready),
+        has_checksum: booleanValue(readiness.has_checksum),
+        is_volume_candidate: isCandidate,
+        conversion_ready: booleanValue(readiness.conversion_ready),
+        project_ready: booleanValue(readiness.project_ready),
+        blockers: [...new Set([...blockerList, ...blockedOperations.map((operation) => `blocked_operation:${operation}`)])],
+      },
+    },
+    `workset-assets[${index}]`
+  );
+};
+
+export const parsePrivateWorksetBundle = ({
+  worksetContents,
+  assetsContents,
+}: PrivateWorksetBundleInput): PrivateWorksetIndex => {
+  const workset = validatePrivateWorksetSummary(parseJson(worksetContents, "workset.json"));
+  const assets = parseJsonl(assetsContents, "workset-assets.jsonl").map((value, index) =>
+    normalizeWorksetAsset(value, workset, index)
+  );
+  const registryId = assets[0]?.registry_id || workset.source_registry.registry_id || workset.workset_id;
+  const metadataGapCount = assets.reduce((sum, asset) => sum + asset.review.gap_codes.length, 0);
+  const reviewQueueCount = assets.filter(
+    (asset) =>
+      asset.status.review_required ||
+      asset.review.gap_codes.length > 0 ||
+      asset.readiness.blockers.length > 0 ||
+      asset.checksum.duplicate_of
+  ).length;
+  const summary: PrivateRegistrySummary = {
+    schema: PRIVATE_REGISTRY_SCHEMA,
+    schema_version: PRIVATE_REGISTRY_SCHEMA_VERSION,
+    registry_builder: workset.workset_builder,
+    registry_id: registryId,
+    created_at: workset.generated_at,
+    source_scan: {
+      scan_dir: workset.source_registry.registry_dir,
+      archive_id: workset.source_registry.archive_id || "archive",
+      root: workset.source_registry.archive_root,
+      scanner: "workset-promotion",
+    },
+    asset_count: assets.length,
+    file_asset_count: assets.filter((asset) => asset.path_type !== "directory_volume").length,
+    logical_asset_count: assets.filter((asset) => asset.path_type === "directory_volume").length,
+    bytes_total: workset.summary.selected_bytes_total,
+    volume_candidate_count: assets.filter((asset) => asset.readiness.is_volume_candidate).length,
+    review_queue_count: reviewQueueCount,
+    metadata_gap_count: metadataGapCount,
+    checksum_record_count: assets.filter((asset) => asset.checksum.digest).length,
+    duplicate_asset_count: assets.filter((asset) => asset.checksum.duplicate_of).length,
+    project_ready_count: assets.filter((asset) => asset.readiness.project_ready).length,
+    output_dir: workset.output_dir,
+  };
+  const searchEntries: PrivateRegistrySearchEntry[] = assets.map((asset) => ({
+    schema: "cell-anatomy-private-archive-search-entry",
+    schema_version: PRIVATE_REGISTRY_SCHEMA_VERSION,
+    asset_id: asset.asset_id,
+    archive_id: asset.archive_id,
+    relative_path: asset.relative_path,
+    title: asset.name || asset.relative_path,
+    search_text: [
+      workset.workset_id,
+      workset.title,
+      asset.archive_id,
+      asset.relative_path,
+      asset.likely_role,
+      asset.metadata.format,
+      asset.metadata.dtype,
+      asset.status.publication_status,
+      asset.status.triage_status,
+      asset.status.rights_status,
+      ...asset.readiness.blockers,
+      ...asset.review.gap_codes,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase(),
+    format: asset.metadata.format,
+    likely_role: asset.likely_role,
+    project_ready: asset.readiness.project_ready,
+    volume_candidate: asset.readiness.is_volume_candidate,
+  }));
+  return {
+    workset,
+    registry: parsePrivateArchiveRegistryBundle({
+      summaryContents: JSON.stringify(summary),
+      assetsContents: assets.map((asset) => JSON.stringify(asset)).join("\n"),
+      searchContents: searchEntries.map((entry) => JSON.stringify(entry)).join("\n"),
+    }),
+  };
+};
+
 export const parsePrivateArchiveRegistryBundle = ({
   summaryContents,
   assetsContents,
@@ -497,4 +925,155 @@ export const privateRegistryAssetStatusLabel = (asset: PrivateRegistryAsset) => 
   if (asset.readiness.conversion_ready) return "Conversion Ready";
   if (asset.readiness.is_volume_candidate) return "Needs Review";
   return asset.status.asset_status || "Discovered";
+};
+
+export const normalizePrivateRegistryLocalPath = (value: string | null | undefined) =>
+  (value || "")
+    .replace(/^file:\/\//, "")
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+
+const privateRegistryAssetLocalPath = (asset: PrivateRegistryAsset) => {
+  const root = normalizePrivateRegistryLocalPath(asset.source.root);
+  const relative = normalizePrivateRegistryLocalPath(asset.relative_path).replace(/^\//, "");
+  return root ? `${root}/${relative}` : relative;
+};
+
+const privateRegistryMatchScore = (
+  asset: PrivateRegistryAsset,
+  derivative: PrivateRegistryLoadedDerivative
+) => {
+  const archiveStatus = derivative.archiveStatus;
+  if (
+    archiveStatus?.assetId === asset.asset_id &&
+    (!archiveStatus.registryId || archiveStatus.registryId === asset.registry_id)
+  ) {
+    return { score: 400, matchedBy: "archive-identity" as const };
+  }
+
+  const checksum = asset.checksum.digest.trim().toLowerCase();
+  const derivativeChecksum = (derivative.source_sha256 || "").trim().toLowerCase();
+  if (
+    checksum.length === 64 &&
+    derivativeChecksum === checksum &&
+    (!asset.size_bytes || !derivative.source_size_bytes || asset.size_bytes === derivative.source_size_bytes)
+  ) {
+    return { score: 300, matchedBy: "checksum" as const };
+  }
+
+  const assetLocalPath = privateRegistryAssetLocalPath(asset);
+  const sourceLocalPath = normalizePrivateRegistryLocalPath(derivative.source_local_path);
+  const outputPath = normalizePrivateRegistryLocalPath(derivative.output_path);
+  if (assetLocalPath && (sourceLocalPath === assetLocalPath || outputPath === assetLocalPath)) {
+    return { score: 200, matchedBy: "local-path" as const };
+  }
+
+  const relativePath = normalizePrivateRegistryLocalPath(asset.relative_path).replace(/^\//, "");
+  const derivativeRelativePath = normalizePrivateRegistryLocalPath(
+    derivative.source_relative_path
+  ).replace(/^\//, "");
+  if (
+    relativePath &&
+    (derivativeRelativePath === relativePath ||
+      sourceLocalPath.endsWith(`/${relativePath}`) ||
+      outputPath.endsWith(`/${relativePath}`))
+  ) {
+    return { score: 100, matchedBy: "relative-path" as const };
+  }
+
+  return null;
+};
+
+export const resolvePrivateRegistryProjectAsset = <Dataset extends PrivateRegistryLoadedDataset>(
+  asset: PrivateRegistryAsset,
+  datasets: Dataset[]
+): PrivateRegistryProjectAssetResolution<Dataset> => {
+  if (!asset.readiness.project_ready || !asset.status.allowed_operations.can_view_in_caos) {
+    return {
+      status: "blocked",
+      summary: "This archive asset is not cleared and ready for a CAOS project.",
+    };
+  }
+
+  const candidates: Array<{
+    dataset: Dataset;
+    derivative: Dataset["derivatives"][number];
+    score: number;
+    matchedBy: "archive-identity" | "checksum" | "local-path" | "relative-path";
+  }> = [];
+
+  for (const dataset of datasets) {
+    for (const derivative of dataset.derivatives) {
+      const match = privateRegistryMatchScore(asset, derivative);
+      if (match) candidates.push({ dataset, derivative, ...match });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return {
+      status: "not-loaded",
+      summary: "The project-ready archive asset is not present in the current Workbench data list.",
+    };
+  }
+
+  const topScore = Math.max(...candidates.map((candidate) => candidate.score));
+  const best = candidates.filter((candidate) => candidate.score === topScore);
+  if (best.length !== 1) {
+    return {
+      status: "ambiguous",
+      summary: "More than one loaded Workbench volume matches this archive asset; resolve the duplicate before creating a project.",
+    };
+  }
+
+  return {
+    status: "ready",
+    dataset: best[0].dataset,
+    derivative: best[0].derivative,
+    matchedBy: best[0].matchedBy,
+  };
+};
+
+const privateRegistryProjectAssetStem = (asset: PrivateRegistryAsset) => {
+  const basename = (asset.name || asset.relative_path.split(/[\\/]/).pop() || "archive-volume").trim();
+  return basename.replace(/\.ome\.zarr$/i, "").replace(/\.[^.]+$/, "") || "archive-volume";
+};
+
+export const buildPrivateRegistryProjectSeed = (
+  asset: PrivateRegistryAsset,
+  workset?: PrivateWorksetSummary | null
+): PrivateRegistryProjectSeed => {
+  const assetStem = privateRegistryProjectAssetStem(asset);
+  const worksetTitle = workset?.title.trim();
+  const name = worksetTitle ? `${worksetTitle} — ${assetStem}` : `${assetStem} project`;
+  const sourceLabel = workset
+    ? `promoted workset ${workset.workset_id}`
+    : `private registry ${asset.registry_id}`;
+
+  return {
+    name,
+    note: `Created from ${sourceLabel}; archive asset ${asset.asset_id} (${asset.relative_path}).`,
+    archiveStatus: {
+      registryId: asset.registry_id,
+      assetId: asset.asset_id,
+      archiveId: asset.archive_id,
+      relativePath: asset.relative_path,
+      assetStatus: asset.status.asset_status,
+      fixityStatus: asset.status.fixity_status,
+      publicationStatus: asset.status.publication_status,
+      triageStatus: asset.status.triage_status,
+      rightsStatus: asset.status.rights_status,
+      classificationStatus: asset.status.classification_status,
+      reviewRequired: asset.status.review_required,
+      blockers: [...asset.readiness.blockers],
+      metadataGapCodes: [...asset.review.gap_codes],
+      allowedOperations: { ...asset.status.allowed_operations },
+      ...(workset
+        ? {
+            worksetId: workset.workset_id,
+            worksetTitle: workset.title,
+          }
+        : {}),
+    },
+  };
 };

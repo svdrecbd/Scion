@@ -13,13 +13,17 @@ import {
   type CaosArchiveStatus,
 } from "./caos-project";
 import {
+  buildPrivateRegistryProjectSeed,
   parsePrivateRegistryAssetsJsonl,
   parsePrivateArchiveRegistryBundle,
   parsePrivateRegistrySummary,
+  parsePrivateWorksetBundle,
   privateRegistryAssetStatusLabel,
+  resolvePrivateRegistryProjectAsset,
   type PrivateArchiveRegistryIndex,
   type PrivateRegistryAsset,
   type PrivateRegistrySummary,
+  type PrivateWorksetSummary,
 } from "./private-registry";
 import { MeasurementOverlay, OrthogonalViewer, RoiOverlay, VolumetricViewer, VoxelPoint } from "./volumetric-viewer";
 
@@ -124,6 +128,12 @@ type NativePrivateRegistryIndexFile = {
   summaryContents: string;
 };
 
+type NativePrivateWorksetFile = {
+  path: string;
+  worksetContents: string;
+  assetsContents: string;
+};
+
 type PrivateRegistryIndexSection = "project_ready" | "conversion_queue" | "review";
 
 type NativePrivateRegistryIndexQuery = {
@@ -145,6 +155,9 @@ type NativePrivateRegistryIndexQueryResult = {
   limit: number;
   totalCount: number;
   assetsContents: string;
+  indexBackend?: string;
+  indexPath?: string;
+  indexRebuilt?: boolean;
 };
 
 type PrivateRegistryAssetPage = {
@@ -318,6 +331,101 @@ type IndexJobResponse = {
   error?: string;
 };
 
+type IndexBatchPlanItem = {
+  kind: "convert" | "slices" | string;
+  dataset_slug: string;
+  dataset_title: string;
+  asset_relative_path: string;
+  registry_asset_id?: string;
+  registry_relative_path?: string;
+  format?: string | null;
+  size_bytes?: number | string | null;
+  dimensions?: Record<string, number | string> | null;
+  index_status: string;
+  existing_job_status?: string | null;
+  command_display: string;
+  start_request: {
+    kind: "convert" | "slices" | string;
+    dataset_slug: string;
+    asset_relative_path: string;
+  };
+};
+
+type IndexBatchPlanResponse = {
+  plan_id: string;
+  created_at_ms: number;
+  source?: "pilot-index" | "private-registry" | string;
+  registry_id?: string | null;
+  root: string;
+  kind: "convert" | "slices" | string;
+  dataset_slug?: string | null;
+  total_limit: number;
+  per_dataset_limit: number;
+  retry_failed: boolean;
+  skip_completed: boolean;
+  summary: {
+    candidate_count: number;
+    planned_count: number;
+    skipped_active: number;
+    skipped_completed: number;
+    skipped_previous_failed: number;
+    skipped_limit: number;
+    datasets: number;
+  };
+  items: IndexBatchPlanItem[];
+  checkpoint: Record<string, unknown>;
+};
+
+type IndexBatchRunSummary = {
+  total: number;
+  pending: number;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+};
+
+type IndexBatchRunItem = {
+  kind: "convert" | "slices" | string;
+  dataset_slug: string;
+  dataset_title: string;
+  asset_relative_path: string;
+  command_display: string;
+  status: "pending" | "queued" | "running" | "cancel_requested" | "completed" | "failed" | "cancelled" | string;
+  job_id?: string | null;
+  existing_job_status?: string | null;
+  started_at_ms?: number | null;
+  finished_at_ms?: number | null;
+  error?: string | null;
+};
+
+type IndexBatchRunRecord = {
+  id: string;
+  plan_id: string;
+  kind: "convert" | "slices" | string;
+  root?: string | null;
+  status: "queued" | "running" | "cancel_requested" | "paused" | "completed" | "failed" | "cancelled" | string;
+  concurrency: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  finished_at_ms?: number | null;
+  checkpoint_path: string;
+  summary: IndexBatchRunSummary;
+  items: IndexBatchRunItem[];
+  log: string[];
+  error?: string | null;
+};
+
+type IndexBatchRunsResponse = {
+  runs: IndexBatchRunRecord[];
+};
+
+type IndexBatchRunResponse = {
+  run: IndexBatchRunRecord | null;
+  error?: string;
+};
+
 type IndexQueueAssetMatch = {
   dataset: IndexQueueDataset;
   asset: IndexQueueAsset;
@@ -423,6 +531,7 @@ const INDEX_JOB_STATUS_LABELS: Record<string, string> = {
   queued: "Queued",
   running: "Running",
   cancel_requested: "Cancelling",
+  paused: "Paused",
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -453,6 +562,7 @@ const emptyPrivateRegistryAssetPage = (limit: number): PrivateRegistryAssetPage 
 const indexJobStatusTone = (status: string) => {
   if (status === "completed") return "var(--atlas-blue-dark)";
   if (status === "running" || status === "queued" || status === "cancel_requested") return "var(--atlas-blue)";
+  if (status === "paused") return "var(--accent-foreground)";
   if (status === "failed" || status === "cancelled") return "var(--atlas-orange)";
   return "var(--accent-foreground)";
 };
@@ -566,12 +676,6 @@ const normalizeLocalPath = (value: string | null | undefined) =>
     .replace(/\\/g, "/")
     .replace(/\/+/g, "/")
     .replace(/\/$/, "");
-
-const registryAssetLocalPath = (asset: PrivateRegistryAsset) => {
-  const root = normalizeLocalPath(asset.source.root);
-  const relative = normalizeLocalPath(asset.relative_path).replace(/^\//, "");
-  return root ? `${root}/${relative}` : relative;
-};
 
 const registryAssetReviewBlockers = (asset: PrivateRegistryAsset) =>
   asset.readiness.blockers.filter((blocker) => blocker !== "blocked_permission");
@@ -1081,15 +1185,28 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [indexQueueStatus, setIndexQueueStatus] = useState<string | null>(null);
   const [indexJobs, setIndexJobs] = useState<IndexJobRecord[]>([]);
   const [indexJobsLoading, setIndexJobsLoading] = useState(false);
+  const [indexBatchPlan, setIndexBatchPlan] = useState<IndexBatchPlanResponse | null>(null);
+  const [indexBatchScope, setIndexBatchScope] = useState<"active" | "all">("active");
+  const [indexBatchTotalLimit, setIndexBatchTotalLimit] = useState(3);
+  const [indexBatchPerDatasetLimit, setIndexBatchPerDatasetLimit] = useState(1);
+  const [indexBatchConcurrency, setIndexBatchConcurrency] = useState(1);
+  const [indexBatchRetryFailed, setIndexBatchRetryFailed] = useState(false);
+  const [indexBatchRuns, setIndexBatchRuns] = useState<IndexBatchRunRecord[]>([]);
+  const [indexBatchRunsLoading, setIndexBatchRunsLoading] = useState(false);
+  const [indexBatchLoading, setIndexBatchLoading] = useState(false);
+  const [indexBatchStatus, setIndexBatchStatus] = useState<string | null>(null);
+  const [indexBatchError, setIndexBatchError] = useState<string | null>(null);
   const completedIndexJobIds = useRef<Set<string>>(new Set());
   const [privateRegistry, setPrivateRegistry] = useState<PrivateArchiveRegistryIndex | null>(null);
   const [privateRegistrySummary, setPrivateRegistrySummary] = useState<PrivateRegistrySummary | null>(null);
+  const [privateWorksetSummary, setPrivateWorksetSummary] = useState<PrivateWorksetSummary | null>(null);
   const [privateRegistryNativePath, setPrivateRegistryNativePath] = useState<string | null>(null);
   const [privateRegistryPath, setPrivateRegistryPath] = useState<string | null>(null);
   const [privateRegistryStatus, setPrivateRegistryStatus] = useState<string | null>(null);
   const [privateRegistryError, setPrivateRegistryError] = useState<string | null>(null);
   const [privateRegistryQuery, setPrivateRegistryQuery] = useState("");
   const [privateRegistryQueueFilter, setPrivateRegistryQueueFilter] = useState<PrivateRegistryQueueFilter>("all");
+  const [privateRegistrySelectedConversionAssetIds, setPrivateRegistrySelectedConversionAssetIds] = useState<string[]>([]);
   const [privateRegistryProjectPage, setPrivateRegistryProjectPage] = useState<PrivateRegistryAssetPage>(() =>
     emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready)
   );
@@ -1426,28 +1543,99 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     });
   };
 
+  const resolveLoadedDerivativeForRegistryAsset = (asset: PrivateRegistryAsset) =>
+    resolvePrivateRegistryProjectAsset(asset, localDatasets);
+
   const findLoadedDerivativeForRegistryAsset = (asset: PrivateRegistryAsset) => {
-    const assetPath = registryAssetLocalPath(asset);
-    for (const dataset of localDatasets) {
-      for (const derivative of dataset.derivatives) {
-        const outputPath = normalizeLocalPath(derivative.output_path);
-        if (outputPath && (outputPath === assetPath || outputPath.endsWith(`/${asset.relative_path}`))) {
-          return { dataset, derivative };
-        }
-      }
-    }
-    return null;
+    const resolution = resolveLoadedDerivativeForRegistryAsset(asset);
+    return resolution.status === "ready" ? resolution : null;
   };
 
   const openRegistryProjectReadyAsset = (asset: PrivateRegistryAsset) => {
-    const target = findLoadedDerivativeForRegistryAsset(asset);
-    if (!target) {
-      setPrivateRegistryStatus("Project-ready registry asset is not present in the current Workbench data list.");
+    const resolution = resolveLoadedDerivativeForRegistryAsset(asset);
+    if (resolution.status !== "ready") {
+      setPrivateRegistryStatus(resolution.summary);
       return;
     }
-    focusDatasetDerivative(target.dataset.slug, target.derivative);
+    focusDatasetDerivative(resolution.dataset.slug, resolution.derivative);
     setActiveTab("telemetry");
-    setPrivateRegistryStatus(`Opened ${formatPathBasename(asset.relative_path)} from ${target.dataset.slug}.`);
+    setPrivateRegistryStatus(`Opened ${formatPathBasename(asset.relative_path)} from ${resolution.dataset.slug}.`);
+  };
+
+  const createCaosProjectFromRegistryAsset = async (asset: PrivateRegistryAsset) => {
+    const resolution = resolveLoadedDerivativeForRegistryAsset(asset);
+    if (resolution.status !== "ready") {
+      setPrivateRegistryStatus(resolution.summary);
+      return;
+    }
+    if (!(await confirmDiscardProjectChanges())) return;
+
+    const seed = buildPrivateRegistryProjectSeed(asset, privateWorksetSummary);
+    const derivative = {
+      ...resolution.derivative,
+      archiveStatus: {
+        ...resolution.derivative.archiveStatus,
+        ...seed.archiveStatus,
+      },
+    };
+    const [zMax, yMax, xMax] = derivative.shape_zyx.map((value) => Math.max(1, value));
+    const zSlice = Math.floor(zMax / 2);
+    const ySlice = Math.floor(yMax / 2);
+    const xSlice = Math.floor(xMax / 2);
+    const view: CaosViewState = {
+      mode: "orthogonal",
+      axis: "z",
+      slice: zSlice,
+      xSlice,
+      ySlice,
+      zSlice,
+      minContrast: 0,
+      maxContrast: derivative.dtype.includes("16") ? 4095 : 255,
+      colormap: 0,
+      logScale: false,
+      downsample: 1,
+      pitch: 0,
+      yaw: 0,
+      alphaScale: 0.15,
+    };
+    const createdAt = new Date().toISOString();
+    const snapshot = buildCaosProjectSnapshot({
+      projectName: seed.name,
+      projectNote: seed.note,
+      dataset: resolution.dataset,
+      derivative,
+      view,
+      existingProjectId: `project_${Date.parse(createdAt)}`,
+      createdAt,
+    });
+
+    try {
+      let path: string | null = null;
+      if (isTauri) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const saved = await invoke<NativeSavedCaosProjectFile | null>("save_caos_project_file", {
+          request: {
+            path: null,
+            contents: serializeCaosProjectSnapshot(snapshot),
+            defaultFilename: `${sanitizeFileSegment(snapshot.project.name)}.caos-project.json`,
+            forceDialog: true,
+          },
+        });
+        if (!saved) {
+          setPrivateRegistryStatus("Project creation canceled; the current CAOS project was not changed.");
+          return;
+        }
+        path = saved.path;
+      }
+
+      applyCaosProjectSnapshot(snapshot, path, "Created");
+      setPrivateRegistryStatus(
+        `${path ? "Created and saved" : "Created"} CAOS project “${snapshot.project.name}” from ${formatPathBasename(asset.relative_path)}.`
+      );
+      setActiveTab("image-notes");
+    } catch (error) {
+      setPrivateRegistryStatus(error instanceof Error ? error.message : "Could not create the CAOS project.");
+    }
   };
 
   const openLocalPath = async (path: string) => {
@@ -1946,6 +2134,25 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       return true;
     });
   }, [privateRegistryUsesNativeIndex, privateRegistryConversionPage.assets, privateRegistry, privateRegistryQueryTokens, privateRegistrySearchTextByAssetId, privateRegistryQueueFilter, indexQueueAssetLookup]);
+  const privateRegistrySelectedConversionAssetSet = useMemo(
+    () => new Set(privateRegistrySelectedConversionAssetIds),
+    [privateRegistrySelectedConversionAssetIds]
+  );
+  const privateRegistrySelectedConversionAssets = useMemo(
+    () =>
+      privateRegistryFilteredConversionQueueAssets.filter((asset) =>
+        privateRegistrySelectedConversionAssetSet.has(asset.asset_id)
+      ),
+    [privateRegistryFilteredConversionQueueAssets, privateRegistrySelectedConversionAssetSet]
+  );
+  const privateRegistryMatchedVisibleConversionCount = useMemo(
+    () =>
+      privateRegistryFilteredConversionQueueAssets.filter((asset) => {
+        const match = findIndexQueueAssetForRegistryAsset(asset);
+        return Boolean(match?.asset.convert_command);
+      }).length,
+    [privateRegistryFilteredConversionQueueAssets, indexQueueAssetLookup]
+  );
   const privateRegistryFilteredReviewAssets = useMemo(() => {
     if (privateRegistryUsesNativeIndex) return privateRegistryReviewPage.assets;
     if (!privateRegistry) return [];
@@ -1961,6 +2168,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     ? privateRegistryReviewPage.totalCount
     : privateRegistryFilteredReviewAssets.length;
   const visibleIndexJobs = useMemo(() => indexJobs.slice(0, 6), [indexJobs]);
+  const visibleIndexBatchRuns = useMemo(() => indexBatchRuns.slice(0, 3), [indexBatchRuns]);
   const findIndexJob = (kind: "convert" | "slices", datasetSlug: string, assetPath: string) =>
     indexJobs.find(
       (job) =>
@@ -2634,12 +2842,11 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     registryPath = privateRegistryNativePath,
     options?: { query?: string; queueFilter?: PrivateRegistryQueueFilter; silent?: boolean }
   ) => {
-    if (!registryPath) return;
-    await Promise.all([
-      queryPrivateRegistryNativePage(registryPath, "project_ready", options),
-      queryPrivateRegistryNativePage(registryPath, "conversion_queue", options),
-      queryPrivateRegistryNativePage(registryPath, "review", options),
-    ]);
+    if (!registryPath) return [];
+    const projectReady = await queryPrivateRegistryNativePage(registryPath, "project_ready", options);
+    const conversionQueue = await queryPrivateRegistryNativePage(registryPath, "conversion_queue", options);
+    const review = await queryPrivateRegistryNativePage(registryPath, "review", options);
+    return [projectReady, conversionQueue, review].filter(Boolean);
   };
 
   const openPrivateRegistryNative = async () => {
@@ -2659,15 +2866,21 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       const summary = parsePrivateRegistrySummary(file.summaryContents);
       setPrivateRegistry(null);
       setPrivateRegistrySummary(summary);
+      setPrivateWorksetSummary(null);
       setPrivateRegistryNativePath(file.path);
       setPrivateRegistryPath(file.path);
       setPrivateRegistryQuery("");
       setPrivateRegistryQueueFilter("all");
+      setPrivateRegistrySelectedConversionAssetIds([]);
       setPrivateRegistryStatus(
-        `Loaded ${summary.asset_count} registry assets from ${summary.registry_id}. Showing bounded pages.`
+        `Loaded ${summary.asset_count} registry assets from ${summary.registry_id}. Preparing SQLite/FTS index.`
       );
       setActiveTab("jobs");
-      await refreshPrivateRegistryNativePages(file.path, { query: "", queueFilter: "all" });
+      const results = await refreshPrivateRegistryNativePages(file.path, { query: "", queueFilter: "all" });
+      const indexPath = results[0]?.indexPath;
+      setPrivateRegistryStatus(
+        `Loaded ${summary.asset_count} registry assets from ${summary.registry_id} using SQLite/FTS${indexPath ? ` (${formatPathBasename(indexPath)})` : ""}.`
+      );
     } catch (error) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -2683,10 +2896,12 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         });
         setPrivateRegistry(parsed);
         setPrivateRegistrySummary(parsed.summary);
+        setPrivateWorksetSummary(null);
         setPrivateRegistryNativePath(null);
         setPrivateRegistryPath(file.path);
         setPrivateRegistryQuery("");
         setPrivateRegistryQueueFilter("all");
+        setPrivateRegistrySelectedConversionAssetIds([]);
         setPrivateRegistryStatus(
           `Loaded ${parsed.summary.asset_count} registry assets from ${parsed.summary.registry_id}.`
         );
@@ -2695,6 +2910,44 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         setPrivateRegistryError(fallbackError instanceof Error ? fallbackError.message : error instanceof Error ? error.message : "Private registry import failed.");
         setPrivateRegistryStatus(null);
       }
+    }
+  };
+
+  const openPrivateWorksetNative = async () => {
+    if (!isTauri) {
+      setPrivateRegistryError("Workset import is available in the desktop Workbench.");
+      return;
+    }
+    setPrivateRegistryError(null);
+    setPrivateRegistryStatus("Opening promoted workset...");
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const file = await invoke<NativePrivateWorksetFile | null>("open_private_workset_file");
+      if (!file) {
+        setPrivateRegistryStatus(null);
+        return;
+      }
+      const parsed = parsePrivateWorksetBundle({
+        worksetContents: file.worksetContents,
+        assetsContents: file.assetsContents,
+      });
+      setPrivateRegistry(parsed.registry);
+      setPrivateRegistrySummary(parsed.registry.summary);
+      setPrivateWorksetSummary(parsed.workset);
+      setPrivateRegistryNativePath(null);
+      setPrivateRegistryPath(file.path);
+      setPrivateRegistryQuery("");
+      setPrivateRegistryQueueFilter("all");
+      setPrivateRegistrySelectedConversionAssetIds([]);
+      setPrivateRegistryProjectPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready));
+      setPrivateRegistryConversionPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.conversion_queue));
+      setPrivateRegistryReviewPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.review));
+      setPrivateRegistryStatus(
+        `Loaded workset ${parsed.workset.workset_id} with ${parsed.workset.summary.selected_asset_count} selected asset${parsed.workset.summary.selected_asset_count === 1 ? "" : "s"}.`
+      );
+    } catch (error) {
+      setPrivateRegistryError(error instanceof Error ? error.message : "Workset import failed.");
+      setPrivateRegistryStatus(null);
     }
   };
 
@@ -2710,7 +2963,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           type="button"
           className="button"
           disabled={page.loading || page.offset === 0}
-          onClick={() => queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: previousOffset })}
+          onClick={() => {
+            if (section === "conversion_queue") setPrivateRegistrySelectedConversionAssetIds([]);
+            void queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: previousOffset });
+          }}
           style={{ padding: "4px 6px", fontSize: 9 }}
         >
           Prev
@@ -2722,7 +2978,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           type="button"
           className="button"
           disabled={page.loading || nextOffset >= page.totalCount}
-          onClick={() => queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: nextOffset })}
+          onClick={() => {
+            if (section === "conversion_queue") setPrivateRegistrySelectedConversionAssetIds([]);
+            void queryPrivateRegistryNativePage(privateRegistryNativePath, section, { offset: nextOffset });
+          }}
           style={{ padding: "4px 6px", fontSize: 9 }}
         >
           Next
@@ -2789,26 +3048,331 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     }
   };
 
+  const postIndexJob = async (
+    kind: "convert" | "slices",
+    datasetSlug: string,
+    assetRelativePath: string
+  ) => {
+    const payload = await volumeJson<IndexJobResponse>("/api/volume/index-jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        kind,
+        dataset_slug: datasetSlug,
+        asset_relative_path: assetRelativePath,
+      }),
+    });
+    if (payload.job) {
+      setIndexJobs((previous) => [payload.job!, ...previous.filter((job) => job.id !== payload.job!.id)]);
+    }
+    return payload.job;
+  };
+
+  const loadIndexBatchRuns = async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setIndexBatchRunsLoading(true);
+    }
+    try {
+      const payload = await volumeJson<IndexBatchRunsResponse>("/api/volume/index-batch-runs");
+      setIndexBatchRuns(payload.runs);
+    } catch (error) {
+      if (!options?.silent) {
+        setIndexBatchError(error instanceof Error ? error.message : "Could not load batch runs.");
+      }
+    } finally {
+      if (!options?.silent) {
+        setIndexBatchRunsLoading(false);
+      }
+    }
+  };
+
   const startIndexJob = async (kind: "convert" | "slices", dataset: IndexQueueDataset, asset: IndexQueueAsset) => {
     setIndexJobsLoading(true);
     setIndexQueueError(null);
     try {
-      const payload = await volumeJson<IndexJobResponse>("/api/volume/index-jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          kind,
-          dataset_slug: dataset.slug,
-          asset_relative_path: asset.relative_path,
-        }),
-      });
-      if (payload.job) {
-        setIndexJobs((previous) => [payload.job!, ...previous.filter((job) => job.id !== payload.job!.id)]);
+      const job = await postIndexJob(kind, dataset.slug, asset.relative_path);
+      if (job) {
         setIndexQueueStatus(`Started ${kind === "convert" ? "conversion" : "slice-cache"} job for ${asset.relative_path}.`);
       }
     } catch (error) {
       setIndexQueueError(error instanceof Error ? error.message : "Could not start index job.");
     } finally {
       setIndexJobsLoading(false);
+    }
+  };
+
+  const loadIndexBatchPlan = async () => {
+    setIndexBatchLoading(true);
+    setIndexBatchError(null);
+    setIndexBatchStatus(null);
+    try {
+      const datasetSlug = indexBatchScope === "active" ? activeDataset?.slug || null : null;
+      if (indexBatchScope === "active" && !datasetSlug) {
+        setIndexBatchError("Select an active dataset before planning an active-dataset batch.");
+        return;
+      }
+      const payload = await volumeJson<IndexBatchPlanResponse>("/api/volume/index-batch-plan", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "convert",
+          dataset_slug: datasetSlug,
+          total_limit: Math.max(1, Math.min(50, Math.round(indexBatchTotalLimit))),
+          per_dataset_limit: Math.max(1, Math.min(50, Math.round(indexBatchPerDatasetLimit))),
+          retry_failed: indexBatchRetryFailed,
+          skip_completed: true,
+        }),
+      });
+      setIndexBatchPlan(payload);
+      setIndexBatchStatus(
+        `Planned ${payload.summary.planned_count} of ${payload.summary.candidate_count} conversion candidates.`
+      );
+    } catch (error) {
+      setIndexBatchError(error instanceof Error ? error.message : "Could not build conversion batch plan.");
+      setIndexBatchPlan(null);
+    } finally {
+      setIndexBatchLoading(false);
+    }
+  };
+
+  const togglePrivateRegistryConversionSelection = (assetId: string) => {
+    setPrivateRegistrySelectedConversionAssetIds((previous) =>
+      previous.includes(assetId)
+        ? previous.filter((id) => id !== assetId)
+        : [...previous, assetId]
+    );
+  };
+
+  const selectVisibleMatchedRegistryConversions = () => {
+    const matchedIds = privateRegistryFilteredConversionQueueAssets
+      .filter((asset) => Boolean(findIndexQueueAssetForRegistryAsset(asset)?.asset.convert_command))
+      .map((asset) => asset.asset_id);
+    setPrivateRegistrySelectedConversionAssetIds(matchedIds);
+    setPrivateRegistryStatus(
+      matchedIds.length
+        ? `Selected ${matchedIds.length} matched conversion asset${matchedIds.length === 1 ? "" : "s"} from the visible registry page.`
+        : "No visible conversion assets are matched to sidecar conversion commands."
+    );
+  };
+
+  const buildRegistryConversionBatchPlan = async () => {
+    if (privateRegistrySelectedConversionAssetIds.length === 0) {
+      setIndexBatchStatus("Select registry conversion assets before building a registry batch plan.");
+      return;
+    }
+
+    setIndexBatchLoading(true);
+    setIndexBatchError(null);
+    setIndexBatchStatus(null);
+    try {
+      let queue = indexQueue;
+      if (!queue) {
+        setPrivateRegistryStatus("Scanning sidecar index queue before planning selected registry conversions.");
+        queue = await loadIndexQueue();
+      }
+      if (!queue) {
+        setIndexBatchError("Scan the sidecar index queue before planning selected registry conversions.");
+        return;
+      }
+
+      const lookup = buildIndexQueueAssetLookup(queue);
+      const selectedAssets = privateRegistryFilteredConversionQueueAssets.filter((asset) =>
+        privateRegistrySelectedConversionAssetIds.includes(asset.asset_id)
+      );
+      const totalLimit = Math.max(1, Math.min(50, Math.round(indexBatchTotalLimit)));
+      const perDatasetLimit = Math.max(1, Math.min(50, Math.round(indexBatchPerDatasetLimit)));
+      const planId = `registry_batch_plan_${Date.now()}`;
+      const createdAt = Date.now();
+      const plannedItems: IndexBatchPlanItem[] = [];
+      const datasetCounts = new Map<string, number>();
+      let skippedActive = 0;
+      let skippedCompleted = 0;
+      let skippedPreviousFailed = 0;
+      let skippedLimit = 0;
+      let skippedUnmatched = 0;
+
+      for (const asset of selectedAssets) {
+        const match = findRegistryIndexQueueMatch(asset, lookup);
+        if (!match?.asset.convert_command) {
+          skippedUnmatched += 1;
+          continue;
+        }
+
+        const existingJob = findIndexJob("convert", match.dataset.slug, match.asset.relative_path);
+        const existingStatus = existingJob?.status || null;
+        if (existingStatus && ["queued", "running", "cancel_requested"].includes(existingStatus)) {
+          skippedActive += 1;
+          continue;
+        }
+        if (existingStatus === "completed") {
+          skippedCompleted += 1;
+          continue;
+        }
+        if (existingStatus && ["failed", "cancelled"].includes(existingStatus) && !indexBatchRetryFailed) {
+          skippedPreviousFailed += 1;
+          continue;
+        }
+
+        const datasetCount = datasetCounts.get(match.dataset.slug) || 0;
+        if (plannedItems.length >= totalLimit || datasetCount >= perDatasetLimit) {
+          skippedLimit += 1;
+          continue;
+        }
+
+        datasetCounts.set(match.dataset.slug, datasetCount + 1);
+        plannedItems.push({
+          kind: "convert",
+          dataset_slug: match.dataset.slug,
+          dataset_title: match.dataset.dataset?.title || asset.archive_id || match.dataset.slug,
+          asset_relative_path: match.asset.relative_path,
+          registry_asset_id: asset.asset_id,
+          registry_relative_path: asset.relative_path,
+          format: asset.metadata.format || match.asset.format || null,
+          size_bytes: asset.size_bytes || match.asset.size_bytes || null,
+          dimensions: asset.metadata.dimensions || match.asset.dimensions || null,
+          index_status: match.asset.index_status,
+          existing_job_status: existingStatus,
+          command_display: match.asset.convert_command,
+          start_request: {
+            kind: "convert",
+            dataset_slug: match.dataset.slug,
+            asset_relative_path: match.asset.relative_path,
+          },
+        });
+      }
+
+      const plan: IndexBatchPlanResponse = {
+        plan_id: planId,
+        created_at_ms: createdAt,
+        source: "private-registry",
+        registry_id: activePrivateRegistrySummary?.registry_id || null,
+        root: queue.root || activePrivateRegistrySummary?.source_scan.root || "",
+        kind: "convert",
+        dataset_slug: null,
+        total_limit: totalLimit,
+        per_dataset_limit: perDatasetLimit,
+        retry_failed: indexBatchRetryFailed,
+        skip_completed: true,
+        summary: {
+          candidate_count: selectedAssets.length,
+          planned_count: plannedItems.length,
+          skipped_active: skippedActive,
+          skipped_completed: skippedCompleted,
+          skipped_previous_failed: skippedPreviousFailed,
+          skipped_limit: skippedLimit,
+          datasets: datasetCounts.size,
+        },
+        items: plannedItems,
+        checkpoint: {
+          schema: "cell-anatomy-index-batch-plan",
+          schema_version: 1,
+          source: "private-registry-conversion-selection",
+          plan_id: planId,
+          registry_id: activePrivateRegistrySummary?.registry_id || null,
+          kind: "convert",
+          total_limit: totalLimit,
+          per_dataset_limit: perDatasetLimit,
+          retry_failed: indexBatchRetryFailed,
+          skip_completed: true,
+          selected_registry_asset_ids: selectedAssets.map((asset) => asset.asset_id),
+          skipped_unmatched: skippedUnmatched,
+          planned_keys: plannedItems.map((item) => ({
+            dataset_slug: item.dataset_slug,
+            asset_relative_path: item.asset_relative_path,
+            registry_asset_id: item.registry_asset_id,
+          })),
+        },
+      };
+
+      setIndexBatchPlan(plan);
+      setIndexBatchStatus(
+        `Planned ${plannedItems.length} selected registry conversion${plannedItems.length === 1 ? "" : "s"} from ${selectedAssets.length} selected asset${selectedAssets.length === 1 ? "" : "s"}${skippedUnmatched ? `; ${skippedUnmatched} unmatched or missing commands` : ""}.`
+      );
+      setActiveTab("jobs");
+    } catch (error) {
+      setIndexBatchError(error instanceof Error ? error.message : "Could not build registry conversion batch plan.");
+      setIndexBatchPlan(null);
+    } finally {
+      setIndexBatchLoading(false);
+    }
+  };
+
+  const exportIndexBatchPlan = () => {
+    if (!indexBatchPlan) return;
+    const name = sanitizeFileSegment(`${indexBatchPlan.kind}-${indexBatchPlan.plan_id}`);
+    downloadBlob(
+      new Blob([JSON.stringify(indexBatchPlan, null, 2)], { type: "application/json" }),
+      `${name}.batch-plan.json`
+    );
+    setIndexBatchStatus("Exported conversion batch plan checkpoint.");
+  };
+
+  const startIndexBatchRun = async () => {
+    if (!indexBatchPlan || indexBatchPlan.items.length === 0) {
+      setIndexBatchStatus("Build a non-empty conversion batch plan first.");
+      return;
+    }
+    setIndexBatchLoading(true);
+    setIndexBatchError(null);
+    try {
+      const payload = await volumeJson<IndexBatchRunResponse>("/api/volume/index-batch-runs", {
+        method: "POST",
+        body: JSON.stringify({
+          plan: indexBatchPlan,
+          concurrency: Math.max(1, Math.min(8, Math.round(indexBatchConcurrency))),
+        }),
+      });
+      if (payload.run) {
+        setIndexBatchRuns((previous) => [payload.run!, ...previous.filter((run) => run.id !== payload.run!.id)]);
+        setIndexBatchStatus(
+          `Started batch run with ${payload.run.summary.total} planned item${payload.run.summary.total === 1 ? "" : "s"} at concurrency ${payload.run.concurrency}.`
+        );
+      }
+      await loadIndexBatchRuns({ silent: true });
+      await loadIndexJobs({ silent: true });
+    } catch (error) {
+      setIndexBatchError(error instanceof Error ? error.message : "Could not start planned conversion run.");
+    } finally {
+      setIndexBatchLoading(false);
+    }
+  };
+
+  const cancelIndexBatchRun = async (run: IndexBatchRunRecord) => {
+    setIndexBatchRunsLoading(true);
+    setIndexBatchError(null);
+    try {
+      const payload = await volumeJson<IndexBatchRunResponse>(`/api/volume/index-batch-runs/${encodeURIComponent(run.id)}/cancel`, {
+        method: "POST",
+      });
+      if (payload.run) {
+        setIndexBatchRuns((previous) => previous.map((existing) => existing.id === payload.run!.id ? payload.run! : existing));
+        setIndexBatchStatus(`Cancellation requested for batch run ${run.id}.`);
+      }
+      await loadIndexBatchRuns({ silent: true });
+      await loadIndexJobs({ silent: true });
+    } catch (error) {
+      setIndexBatchError(error instanceof Error ? error.message : "Could not cancel batch run.");
+    } finally {
+      setIndexBatchRunsLoading(false);
+    }
+  };
+
+  const resumeIndexBatchRun = async (run: IndexBatchRunRecord) => {
+    setIndexBatchRunsLoading(true);
+    setIndexBatchError(null);
+    try {
+      const payload = await volumeJson<IndexBatchRunResponse>(`/api/volume/index-batch-runs/${encodeURIComponent(run.id)}/resume`, {
+        method: "POST",
+        body: JSON.stringify({ retry_failed: indexBatchRetryFailed }),
+      });
+      if (payload.run) {
+        setIndexBatchRuns((previous) => [payload.run!, ...previous.filter((existing) => existing.id !== payload.run!.id)]);
+        setIndexBatchStatus(`Resumed batch run ${run.id}.`);
+      }
+      await loadIndexBatchRuns({ silent: true });
+      await loadIndexJobs({ silent: true });
+    } catch (error) {
+      setIndexBatchError(error instanceof Error ? error.message : "Could not resume batch run.");
+    } finally {
+      setIndexBatchRunsLoading(false);
     }
   };
 
@@ -2909,8 +3473,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   useEffect(() => {
     if (activeTab !== "jobs") return;
     void loadIndexJobs({ silent: true });
+    void loadIndexBatchRuns({ silent: true });
     const interval = window.setInterval(() => {
       void loadIndexJobs({ silent: true });
+      void loadIndexBatchRuns({ silent: true });
     }, 2500);
     return () => window.clearInterval(interval);
   }, [activeTab]);
@@ -2961,6 +3527,28 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     measurements: activeMeasurements,
     rois: activeRois,
     jobs: activeJobs,
+    indexBatchPlan: indexBatchPlan
+      ? {
+          plan_id: indexBatchPlan.plan_id,
+          created_at_ms: indexBatchPlan.created_at_ms,
+          source: indexBatchPlan.source || "pilot-index",
+          registry_id: indexBatchPlan.registry_id || null,
+          kind: indexBatchPlan.kind,
+          dataset_slug: indexBatchPlan.dataset_slug,
+          summary: indexBatchPlan.summary,
+          checkpoint: indexBatchPlan.checkpoint,
+        }
+      : null,
+    indexBatchRuns: indexBatchRuns.slice(0, 5).map((run) => ({
+      id: run.id,
+      plan_id: run.plan_id,
+      status: run.status,
+      concurrency: run.concurrency,
+      summary: run.summary,
+      checkpoint_path: run.checkpoint_path,
+      updated_at_ms: run.updated_at_ms,
+      error: run.error,
+    })),
     note: sessionNote,
   });
 
@@ -3220,10 +3808,33 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       importStatus,
       projectRecoveryStatus,
       localOpenReport,
+      indexBatchPlan: indexBatchPlan
+        ? {
+            plan_id: indexBatchPlan.plan_id,
+            created_at_ms: indexBatchPlan.created_at_ms,
+            source: indexBatchPlan.source || "pilot-index",
+            registry_id: indexBatchPlan.registry_id || null,
+            kind: indexBatchPlan.kind,
+            dataset_slug: indexBatchPlan.dataset_slug,
+            summary: indexBatchPlan.summary,
+            checkpoint: indexBatchPlan.checkpoint,
+          }
+        : null,
+      indexBatchRuns: indexBatchRuns.slice(0, 10).map((run) => ({
+        id: run.id,
+        plan_id: run.plan_id,
+        status: run.status,
+        concurrency: run.concurrency,
+        summary: run.summary,
+        checkpoint_path: run.checkpoint_path,
+        updated_at_ms: run.updated_at_ms,
+        error: run.error,
+      })),
       privateRegistry: activePrivateRegistrySummary
         ? {
             path: privateRegistryPath,
             summary: activePrivateRegistrySummary,
+            workset: privateWorksetSummary,
             mode: privateRegistryNativePath ? "native-index" : "bundle",
             reviewAssets: privateRegistryFilteredReviewAssets.slice(0, 200).map((asset) => ({
               asset_id: asset.asset_id,
@@ -3275,7 +3886,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const applyCaosProjectSnapshot = (
     snapshot: CaosProjectSnapshot,
     path: string | null,
-    actionLabel: "Opened" | "Imported" | "Restored"
+    actionLabel: "Opened" | "Imported" | "Restored" | "Created"
   ) => {
     const activeVolume = resolveCaosProjectActiveVolume(snapshot, localDatasets);
     if (activeVolume.status === "missing-volume") {
@@ -3534,6 +4145,9 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         break;
       case "open-private-registry":
         void openPrivateRegistryNative();
+        break;
+      case "open-private-workset":
+        void openPrivateWorksetNative();
         break;
       case "show-notes":
         setActiveTab("image-notes");
@@ -5421,7 +6035,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </button>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 7 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 7 }}>
                 <button
                   type="button"
                   className="button"
@@ -5437,6 +6051,9 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </button>
                 <button type="button" className="button" onClick={openPrivateRegistryNative} disabled={!isTauri} style={{ padding: "6px 8px", fontSize: 9.5 }}>
                   Registry
+                </button>
+                <button type="button" className="button" onClick={openPrivateWorksetNative} disabled={!isTauri} style={{ padding: "6px 8px", fontSize: 9.5 }}>
+                  Workset
                 </button>
                 <button
                   type="button"
@@ -5463,6 +6080,194 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                   {indexQueueStatus}
                 </p>
               )}
+
+              <div style={{ display: "grid", gap: 8, border: "1px solid var(--border)", background: "rgba(0, 0, 0, 0.06)", padding: "8px 9px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <strong style={{ display: "block", fontSize: 11, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                      Batch Conversion Plan
+                    </strong>
+                    <span className="muted" style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {indexBatchPlan ? indexBatchPlan.plan_id : "No plan loaded"}
+                    </span>
+                  </div>
+                  <span style={{ color: indexBatchPlan?.summary.planned_count ? "var(--atlas-blue-dark)" : "var(--accent-foreground)", fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
+                    {indexBatchPlan?.summary.planned_count ?? 0}
+                  </span>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
+                  {(["active", "all"] as const).map((scope) => (
+                    <button
+                      key={scope}
+                      type="button"
+                      className="button"
+                      onClick={() => setIndexBatchScope(scope)}
+                      style={{
+                        padding: "5px 6px",
+                        fontSize: 9,
+                        background: indexBatchScope === scope ? "var(--atlas-blue)" : undefined,
+                        color: indexBatchScope === scope ? "white" : undefined,
+                      }}
+                    >
+                      {scope === "active" ? "Active Dataset" : "All Datasets"}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7 }}>
+                  <label className="muted" style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                    Total Cap
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={indexBatchTotalLimit}
+                      onChange={(event) => setIndexBatchTotalLimit(Math.max(1, Math.min(50, Number(event.target.value) || 1)))}
+                      style={{ border: "1px solid var(--border)", padding: "5px 6px", fontSize: 10, fontFamily: "var(--font-display)" }}
+                    />
+                  </label>
+                  <label className="muted" style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                    Per Dataset
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={indexBatchPerDatasetLimit}
+                      onChange={(event) => setIndexBatchPerDatasetLimit(Math.max(1, Math.min(50, Number(event.target.value) || 1)))}
+                      style={{ border: "1px solid var(--border)", padding: "5px 6px", fontSize: 10, fontFamily: "var(--font-display)" }}
+                    />
+                  </label>
+                  <label className="muted" style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                    Concurrency
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={indexBatchConcurrency}
+                      onChange={(event) => setIndexBatchConcurrency(Math.max(1, Math.min(8, Number(event.target.value) || 1)))}
+                      style={{ border: "1px solid var(--border)", padding: "5px 6px", fontSize: 10, fontFamily: "var(--font-display)" }}
+                    />
+                  </label>
+                </div>
+
+                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                  <input
+                    type="checkbox"
+                    checked={indexBatchRetryFailed}
+                    onChange={(event) => setIndexBatchRetryFailed(event.target.checked)}
+                  />
+                  Retry failed or cancelled jobs
+                </label>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
+                  <button type="button" className="button" onClick={loadIndexBatchPlan} disabled={indexBatchLoading || indexBatchRunsLoading} style={{ padding: "5px 6px", fontSize: 9 }}>
+                    {indexBatchLoading ? "Planning" : "Plan"}
+                  </button>
+                  <button type="button" className="button" onClick={startIndexBatchRun} disabled={indexBatchLoading || indexBatchRunsLoading || !indexBatchPlan?.items.length} style={{ padding: "5px 6px", fontSize: 9 }}>
+                    Start Run
+                  </button>
+                  <button type="button" className="button" onClick={exportIndexBatchPlan} disabled={!indexBatchPlan} style={{ padding: "5px 6px", fontSize: 9 }}>
+                    Export
+                  </button>
+                </div>
+
+                {indexBatchError ? (
+                  <p style={{ margin: 0, color: "var(--atlas-orange)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                    {indexBatchError}
+                  </p>
+                ) : null}
+                {indexBatchStatus ? (
+                  <p className="muted" style={{ margin: 0, fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                    {indexBatchStatus}
+                  </p>
+                ) : null}
+
+                {indexBatchPlan ? (
+                  <div style={{ display: "grid", gap: 7 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
+                      {[
+                        ["Candidates", indexBatchPlan.summary.candidate_count],
+                        ["Planned", indexBatchPlan.summary.planned_count],
+                        ["Active", indexBatchPlan.summary.skipped_active],
+                        ["Done", indexBatchPlan.summary.skipped_completed],
+                        ["Retry", indexBatchPlan.summary.skipped_previous_failed],
+                        ["Limit", indexBatchPlan.summary.skipped_limit],
+                      ].map(([label, value]) => (
+                        <div key={label} style={{ border: "1px solid var(--border)", background: "rgba(255, 255, 255, 0.16)", padding: "5px 6px", fontFamily: "var(--font-display)" }}>
+                          <span className="muted" style={{ display: "block", fontSize: 8.5, textTransform: "uppercase", letterSpacing: 0 }}>
+                            {label}
+                          </span>
+                          <strong style={{ display: "block", fontSize: 11, color: "var(--atlas-blue-dark)" }}>
+                            {value}
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                    {indexBatchPlan.items.slice(0, 5).map((item) => (
+                      <div key={`${item.dataset_slug}-${item.asset_relative_path}`} style={{ display: "grid", gap: 4, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+                        <strong style={{ display: "block", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-display)" }}>
+                          {item.asset_relative_path}
+                        </strong>
+                        <span className="muted" style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {item.dataset_slug} | {item.format || "unknown"} | {formatBytes(item.size_bytes)} | {formatDimensions(item.dimensions)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {visibleIndexBatchRuns.length > 0 ? (
+                  <div style={{ display: "grid", gap: 7, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                      <strong style={{ display: "block", fontSize: 10.5, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                        Recent Runs
+                      </strong>
+                      <button type="button" className="button" onClick={() => loadIndexBatchRuns()} disabled={indexBatchRunsLoading} style={{ padding: "4px 6px", fontSize: 8.5 }}>
+                        {indexBatchRunsLoading ? "Refreshing" : "Refresh"}
+                      </button>
+                    </div>
+                    {visibleIndexBatchRuns.map((run) => {
+                      const runActive = ["queued", "running", "cancel_requested"].includes(run.status);
+                      const canResume = ["paused", "failed", "cancelled"].includes(run.status) && run.summary.completed < run.summary.total;
+                      return (
+                        <div key={run.id} style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 7 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                            <div style={{ minWidth: 0 }}>
+                              <strong style={{ display: "block", fontSize: 10.5, color: "var(--atlas-blue-dark)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-display)" }}>
+                                {run.kind === "convert" ? "Convert" : "Slice Cache"} batch | {run.plan_id}
+                              </strong>
+                              <span className="muted" style={{ display: "block", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {run.summary.completed}/{run.summary.total} done | {run.summary.running} active | {run.summary.failed} failed | c{run.concurrency}
+                              </span>
+                            </div>
+                            <span style={{ color: indexJobStatusTone(run.status), fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
+                              {INDEX_JOB_STATUS_LABELS[run.status] || run.status}
+                            </span>
+                          </div>
+                          <span className="muted" style={{ display: "block", fontSize: 8.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {run.checkpoint_path}
+                          </span>
+                          {(runActive || canResume) ? (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {runActive ? (
+                                <button type="button" className="button" onClick={() => cancelIndexBatchRun(run)} disabled={run.status === "cancel_requested" || indexBatchRunsLoading} style={{ padding: "4px 6px", fontSize: 8.8 }}>
+                                  Cancel
+                                </button>
+                              ) : null}
+                              {canResume ? (
+                                <button type="button" className="button" onClick={() => resumeIndexBatchRun(run)} disabled={indexBatchRunsLoading} style={{ padding: "4px 6px", fontSize: 8.8 }}>
+                                  Resume
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
 
               {indexQueue && (
                 <div style={{ display: "grid", gap: 9 }}>
@@ -5614,11 +6419,16 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
                   <div style={{ minWidth: 0 }}>
                     <span className="muted" style={{ display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: 0, fontFamily: "var(--font-display)", fontWeight: 600 }}>
-                      Local Registry
+                      {privateWorksetSummary ? "Promoted Workset" : "Local Registry"}
                     </span>
                     <strong style={{ display: "block", fontSize: 12, color: "var(--foreground)", fontFamily: "var(--font-display)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {activePrivateRegistrySummary?.registry_id || "Registry"}
+                      {privateWorksetSummary?.title || activePrivateRegistrySummary?.registry_id || "Registry"}
                     </strong>
+                    {privateWorksetSummary ? (
+                      <span className="muted" title={privateWorksetSummary.workset_id} style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {privateWorksetSummary.workset_id} from {privateWorksetSummary.source_registry.registry_id || "registry"}
+                      </span>
+                    ) : null}
                     {privateRegistryPath ? (
                       <span className="muted" title={privateRegistryPath} style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {formatPathBasename(privateRegistryPath)}
@@ -5631,14 +6441,16 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                       onClick={() => {
                         setPrivateRegistry(null);
                         setPrivateRegistrySummary(null);
+                        setPrivateWorksetSummary(null);
                         setPrivateRegistryNativePath(null);
                         setPrivateRegistryPath(null);
                         setPrivateRegistryQuery("");
                         setPrivateRegistryQueueFilter("all");
+                        setPrivateRegistrySelectedConversionAssetIds([]);
                         setPrivateRegistryProjectPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.project_ready));
                         setPrivateRegistryConversionPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.conversion_queue));
                         setPrivateRegistryReviewPage(emptyPrivateRegistryAssetPage(PRIVATE_REGISTRY_PAGE_LIMITS.review));
-                        setPrivateRegistryStatus("Private registry view cleared.");
+                        setPrivateRegistryStatus("Local registry/workset view cleared.");
                         setPrivateRegistryError(null);
                       }}
                     disabled={!activePrivateRegistrySummary}
@@ -5690,12 +6502,48 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                         ))}
                       </div>
 
+                      {privateWorksetSummary ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
+                          {[
+                            ["Dataset", privateWorksetSummary.summary.dataset_mode_ready_count],
+                            ["Selected", formatBytes(privateWorksetSummary.summary.selected_bytes_total)],
+                            [
+                              "Blocked Ops",
+                              Object.values(privateWorksetSummary.summary.blocked_operation_counts).reduce(
+                                (sum, value) => sum + value,
+                                0
+                              ),
+                            ],
+                          ].map(([label, value]) => (
+                            <div
+                              key={label}
+                              style={{
+                                border: "1px solid var(--border)",
+                                background: "rgba(31, 111, 135, 0.08)",
+                                padding: "6px 7px",
+                                fontFamily: "var(--font-display)",
+                              }}
+                            >
+                              <span className="muted" style={{ display: "block", fontSize: 8.5, textTransform: "uppercase", letterSpacing: 0 }}>
+                                {label}
+                              </span>
+                              <strong style={{ display: "block", fontSize: 12, color: "var(--atlas-blue-dark)" }}>
+                                {value}
+                              </strong>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
                       <div style={{ display: "grid", gap: 7 }}>
                         <input
                           type="search"
                           aria-label="Search local registry assets"
                           value={privateRegistryQuery}
-                          onChange={(event) => setPrivateRegistryQuery(event.target.value)}
+                          onChange={(event) => {
+                            setPrivateRegistryQuery(event.target.value);
+                            setPrivateRegistrySelectedConversionAssetIds([]);
+                          }}
                           placeholder="Search path, format, dtype, status, gap"
                           style={{
                             width: "100%",
@@ -5714,7 +6562,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                               key={filter}
                               type="button"
                               className="button"
-                              onClick={() => setPrivateRegistryQueueFilter(filter)}
+                              onClick={() => {
+                                setPrivateRegistryQueueFilter(filter);
+                                setPrivateRegistrySelectedConversionAssetIds([]);
+                              }}
                               style={{
                                 padding: "5px 6px",
                                 fontSize: 9,
@@ -5761,16 +6612,28 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                                       {asset.metadata.format || "unknown"} | {formatBytes(asset.size_bytes)} | {formatDimensions(asset.metadata.dimensions)}
                                     </span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    className="button"
-                                    onClick={() => openRegistryProjectReadyAsset(asset)}
-                                    disabled={!target}
-                                    title={target ? `Open ${target.dataset.slug}` : "Refresh Workbench data before opening this registry asset."}
-                                    style={{ padding: "5px 8px", fontSize: 9.5 }}
-                                  >
-                                    Open
-                                  </button>
+                                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                    <button
+                                      type="button"
+                                      className="button"
+                                      onClick={() => openRegistryProjectReadyAsset(asset)}
+                                      disabled={!target}
+                                      title={target ? `Open ${target.dataset.slug}` : "Load the matching volume before opening this registry asset."}
+                                      style={{ padding: "5px 8px", fontSize: 9.5 }}
+                                    >
+                                      Open
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="button"
+                                      onClick={() => void createCaosProjectFromRegistryAsset(asset)}
+                                      disabled={!target}
+                                      title={target ? `Create a CAOS project from ${target.dataset.slug}` : "Load the matching volume before creating a project."}
+                                      style={{ padding: "5px 8px", fontSize: 9.5 }}
+                                    >
+                                      Create Project…
+                                    </button>
+                                  </div>
                                 </div>
                                 <span style={{ color: "var(--atlas-blue-dark)", fontSize: 9.5, fontFamily: "var(--font-display)", fontWeight: 700 }}>
                                   {privateRegistryAssetStatusLabel(asset)}
@@ -5800,6 +6663,38 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                               {privateRegistryFilteredConversionQueueAssets.length} shown / {privateRegistryConversionQueueTotal}
                             </span>
                           </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={selectVisibleMatchedRegistryConversions}
+                              disabled={!privateRegistryMatchedVisibleConversionCount}
+                              style={{ padding: "5px 6px", fontSize: 9 }}
+                            >
+                              Select Matched
+                            </button>
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={buildRegistryConversionBatchPlan}
+                              disabled={indexBatchLoading || !privateRegistrySelectedConversionAssets.length}
+                              style={{ padding: "5px 6px", fontSize: 9 }}
+                            >
+                              Plan Selected
+                            </button>
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={() => setPrivateRegistrySelectedConversionAssetIds([])}
+                              disabled={!privateRegistrySelectedConversionAssetIds.length}
+                              style={{ padding: "5px 6px", fontSize: 9 }}
+                            >
+                              Clear Selected
+                            </button>
+                          </div>
+                          <p className="muted" style={{ margin: 0, fontSize: 9.5, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                            {privateRegistrySelectedConversionAssets.length} selected on this page | {privateRegistryMatchedVisibleConversionCount} matched to sidecar conversion commands
+                          </p>
                           {privateRegistryFilteredConversionQueueAssets.length > 0 ? (
                             privateRegistryFilteredConversionQueueAssets.map((asset) => {
                               const reviewBlockers = registryAssetReviewBlockers(asset);
@@ -5807,6 +6702,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                               const convertJob = queueMatch ? findIndexJob("convert", queueMatch.dataset.slug, queueMatch.asset.relative_path) : undefined;
                               const convertBusy = convertJob && ["queued", "running", "cancel_requested"].includes(convertJob.status);
                               const convertDisabled = Boolean(convertBusy || indexJobsLoading || (queueMatch && !queueMatch.asset.convert_command));
+                              const selected = privateRegistrySelectedConversionAssetSet.has(asset.asset_id);
                               return (
                                 <div
                                 key={asset.asset_id}
@@ -5818,7 +6714,15 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                                   padding: "8px 9px",
                                 }}
                               >
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 8, alignItems: "start" }}>
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Select ${asset.relative_path} for registry batch conversion`}
+                                    checked={selected}
+                                    disabled={!queueMatch?.asset.convert_command}
+                                    onChange={() => togglePrivateRegistryConversionSelection(asset.asset_id)}
+                                    style={{ marginTop: 2 }}
+                                  />
                                   <div style={{ minWidth: 0 }}>
                                     <strong style={{ display: "block", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
                                       {asset.relative_path}

@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -14,28 +15,32 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tower_http::cors::{Any, CorsLayer};
-use rusqlite::Connection;
 
 static CUSTOM_DATASETS: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
+static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 fn get_custom_datasets() -> &'static Mutex<Vec<serde_json::Value>> {
     CUSTOM_DATASETS.get_or_init(|| Mutex::new(load_custom_dataset_registry()))
 }
 
-
 // Embed metadata CSVs for full self-contained offline capability
 const STUDY_MANIFEST_CSV: &str = include_str!("../../../references/manifests/study_manifest.csv");
 const CORPUS_LOCATOR_CSV: &str = include_str!("../../../references/manifests/corpus_locator.csv");
-const PUBLIC_DATA_ASSETS_CSV: &str = include_str!("../../../references/manifests/public_data_assets.csv");
+const PUBLIC_DATA_ASSETS_CSV: &str =
+    include_str!("../../../references/manifests/public_data_assets.csv");
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
     index_jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    index_batch_runs: Arc<Mutex<BTreeMap<String, IndexBatchRunRecord>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -61,6 +66,71 @@ struct StartIndexJobRequest {
     kind: String,
     dataset_slug: String,
     asset_relative_path: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct IndexBatchPlanRequest {
+    kind: String,
+    dataset_slug: Option<String>,
+    total_limit: Option<usize>,
+    per_dataset_limit: Option<usize>,
+    retry_failed: Option<bool>,
+    skip_completed: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct StartIndexBatchRunRequest {
+    plan: Value,
+    concurrency: Option<usize>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct ResumeIndexBatchRunRequest {
+    retry_failed: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct IndexBatchRunSummary {
+    total: usize,
+    pending: usize,
+    queued: usize,
+    running: usize,
+    completed: usize,
+    failed: usize,
+    cancelled: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct IndexBatchRunItem {
+    kind: String,
+    dataset_slug: String,
+    dataset_title: String,
+    asset_relative_path: String,
+    command_display: String,
+    status: String,
+    job_id: Option<String>,
+    existing_job_status: Option<String>,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct IndexBatchRunRecord {
+    id: String,
+    plan_id: String,
+    kind: String,
+    root: Option<String>,
+    status: String,
+    concurrency: usize,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    finished_at_ms: Option<u64>,
+    checkpoint_path: String,
+    summary: IndexBatchRunSummary,
+    items: Vec<IndexBatchRunItem>,
+    log: Vec<String>,
+    error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -179,6 +249,14 @@ fn get_custom_dataset_registry_path() -> PathBuf {
     get_workbench_state_dir().join("local-datasets.json")
 }
 
+fn get_index_batch_runs_dir() -> PathBuf {
+    get_workbench_state_dir().join("index-batch-runs")
+}
+
+fn get_index_batch_run_path(run_id: &str) -> PathBuf {
+    get_index_batch_runs_dir().join(format!("{}.json", run_id))
+}
+
 fn dataset_output_path_exists(dataset: &Value) -> bool {
     dataset
         .get("derivatives")
@@ -200,7 +278,10 @@ fn load_custom_dataset_registry() -> Vec<Value> {
     let parsed = match serde_json::from_reader::<_, Vec<Value>>(file) {
         Ok(parsed) => parsed,
         Err(err) => {
-            eprintln!("Failed to parse local dataset registry {:?}: {}", registry_path, err);
+            eprintln!(
+                "Failed to parse local dataset registry {:?}: {}",
+                registry_path, err
+            );
             return Vec::new();
         }
     };
@@ -253,7 +334,11 @@ fn relative_pilot_asset_path(dataset_dir: &Path, asset: &Value) -> String {
     value_str(source, "repository_path").to_string()
 }
 
-fn find_manifest_asset<'a>(manifest: &'a Value, key: &str, relative_path: &str) -> Option<&'a Value> {
+fn find_manifest_asset<'a>(
+    manifest: &'a Value,
+    key: &str,
+    relative_path: &str,
+) -> Option<&'a Value> {
     manifest
         .get(key)
         .and_then(|items| items.as_array())
@@ -266,7 +351,9 @@ fn find_manifest_asset<'a>(manifest: &'a Value, key: &str, relative_path: &str) 
 
 fn find_derivative<'a>(derivatives: &'a [Value], relative_path: &str) -> Option<&'a Value> {
     derivatives.iter().find(|item| {
-        item.get("source_relative_path").and_then(|value| value.as_str()) == Some(relative_path)
+        item.get("source_relative_path")
+            .and_then(|value| value.as_str())
+            == Some(relative_path)
     })
 }
 
@@ -320,7 +407,10 @@ fn pilot_index_queue_payload() -> Value {
             .and_then(|items| items.as_array())
             .cloned()
             .unwrap_or_default();
-        let dataset = state.get("dataset").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let dataset = state
+            .get("dataset")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         let slug = dataset_dir
             .file_name()
             .and_then(|value| value.to_str())
@@ -335,13 +425,26 @@ fn pilot_index_queue_payload() -> Value {
             .unwrap_or_default();
 
         for asset in assets {
-            let mirrored = asset.get("mirrored_asset").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let volume = asset.get("validated_volume").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let streamable = asset.get("streamable_derivative").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let slice_cache = asset.get("browser_slice_cache").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let mirrored = asset
+                .get("mirrored_asset")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let volume = asset
+                .get("validated_volume")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let streamable = asset
+                .get("streamable_derivative")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let slice_cache = asset
+                .get("browser_slice_cache")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
             let relative_path = relative_pilot_asset_path(&dataset_dir, &asset);
             let derivative = find_derivative(&derivatives, &relative_path).cloned();
-            let ready_conversion = find_manifest_asset(&readiness, "ready_assets", &relative_path).cloned();
+            let ready_conversion =
+                find_manifest_asset(&readiness, "ready_assets", &relative_path).cloned();
             let slice_supported = ready_conversion
                 .as_ref()
                 .and_then(|ready| ready.get("format").and_then(|format| format.as_str()))
@@ -380,7 +483,10 @@ fn pilot_index_queue_payload() -> Value {
                 "sidecar" => "sidecars",
                 _ => "blocked",
             };
-            let current = totals.get(counter).and_then(|value| value.as_i64()).unwrap_or(0);
+            let current = totals
+                .get(counter)
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
             totals[counter] = serde_json::json!(current + 1);
 
             let convert_command = if converter_supported && !indexed {
@@ -423,7 +529,10 @@ fn pilot_index_queue_payload() -> Value {
             }));
         }
 
-        let dataset_total = totals.get("datasets").and_then(|value| value.as_i64()).unwrap_or(0);
+        let dataset_total = totals
+            .get("datasets")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
         totals["datasets"] = serde_json::json!(dataset_total + 1);
         datasets.push(serde_json::json!({
             "slug": slug,
@@ -449,12 +558,22 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn unique_local_id(prefix: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        prefix,
+        now_ms(),
+        LOCAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn json_response(status: StatusCode, payload: Value) -> axum::response::Response {
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&payload).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 fn get_repo_root() -> PathBuf {
@@ -472,7 +591,10 @@ fn get_repo_root() -> PathBuf {
         return cwd;
     }
     for ancestor in cwd.ancestors() {
-        if ancestor.join("workers/ingestion/public_data_pilot.py").exists() {
+        if ancestor
+            .join("workers/ingestion/public_data_pilot.py")
+            .exists()
+        {
             return ancestor.to_path_buf();
         }
     }
@@ -487,14 +609,23 @@ fn normalize_index_job_kind(kind: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, Vec<String>, String, PathBuf), String> {
+fn resolve_index_job_command(
+    request: &StartIndexJobRequest,
+) -> Result<(String, Vec<String>, String, PathBuf), String> {
     let kind = normalize_index_job_kind(&request.kind)
         .ok_or_else(|| "Unsupported index job kind. Use convert or slices.".to_string())?;
     let queue = pilot_index_queue_payload();
-    if !queue.get("root_exists").and_then(|value| value.as_bool()).unwrap_or(false) {
+    if !queue
+        .get("root_exists")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
         return Err(format!(
             "Public data root not found: {}",
-            queue.get("root").and_then(|value| value.as_str()).unwrap_or("")
+            queue
+                .get("root")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
         ));
     }
 
@@ -513,9 +644,18 @@ fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, 
     let asset = assets
         .iter()
         .find(|asset| value_str(asset, "relative_path") == request.asset_relative_path)
-        .ok_or_else(|| format!("Asset not found in index queue: {}", request.asset_relative_path))?;
+        .ok_or_else(|| {
+            format!(
+                "Asset not found in index queue: {}",
+                request.asset_relative_path
+            )
+        })?;
 
-    let command_key = if kind == "convert" { "convert_command" } else { "slice_command" };
+    let command_key = if kind == "convert" {
+        "convert_command"
+    } else {
+        "slice_command"
+    };
     let command_available = asset
         .get(command_key)
         .and_then(|value| value.as_str())
@@ -524,7 +664,11 @@ fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, 
     if !command_available {
         return Err(format!(
             "{} is not currently available for {} ({})",
-            if kind == "convert" { "Conversion" } else { "Slice-cache generation" },
+            if kind == "convert" {
+                "Conversion"
+            } else {
+                "Slice-cache generation"
+            },
             request.asset_relative_path,
             value_str(asset, "index_status")
         ));
@@ -539,7 +683,11 @@ fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, 
         ));
     }
 
-    let root = queue.get("root").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let root = queue
+        .get("root")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
     let command = vec![
         "python3".to_string(),
         script_path.to_string_lossy().to_string(),
@@ -561,7 +709,514 @@ fn resolve_index_job_command(request: &StartIndexJobRequest) -> Result<(String, 
     Ok((kind.to_string(), command, command_display, repo_root))
 }
 
-fn append_index_job_log(jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: &str, line: String) {
+fn latest_index_job_status(
+    jobs: &BTreeMap<String, IndexJobRecord>,
+    kind: &str,
+    dataset_slug: &str,
+    asset_relative_path: &str,
+) -> Option<String> {
+    jobs.values()
+        .filter(|job| {
+            job.kind == kind
+                && job.dataset_slug == dataset_slug
+                && job.asset_relative_path == asset_relative_path
+        })
+        .max_by_key(|job| job.created_at_ms)
+        .map(|job| job.status.clone())
+}
+
+fn is_active_index_status(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "cancel_requested")
+}
+
+fn command_key_for_index_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "convert" => Some("convert_command"),
+        "slices" => Some("slice_command"),
+        _ => None,
+    }
+}
+
+fn build_index_batch_plan(
+    queue: &Value,
+    jobs: &BTreeMap<String, IndexJobRecord>,
+    request: &IndexBatchPlanRequest,
+) -> Result<Value, String> {
+    let kind = normalize_index_job_kind(&request.kind)
+        .ok_or_else(|| "Unsupported index job kind. Use convert or slices.".to_string())?;
+    let command_key = command_key_for_index_kind(kind)
+        .ok_or_else(|| "Unsupported index job kind. Use convert or slices.".to_string())?;
+    if !queue
+        .get("root_exists")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Public data root not found: {}",
+            queue
+                .get("root")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+        ));
+    }
+
+    let total_limit = request.total_limit.unwrap_or(5).clamp(1, 50);
+    let per_dataset_limit = request
+        .per_dataset_limit
+        .unwrap_or(total_limit)
+        .clamp(1, total_limit);
+    let retry_failed = request.retry_failed.unwrap_or(false);
+    let skip_completed = request.skip_completed.unwrap_or(true);
+    let dataset_filter = request
+        .dataset_slug
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let datasets = queue
+        .get("datasets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Index queue payload did not include datasets.".to_string())?;
+    let mut sorted_datasets: Vec<&Value> = datasets.iter().collect();
+    sorted_datasets.sort_by(|left, right| value_str(left, "slug").cmp(value_str(right, "slug")));
+
+    let mut candidate_count = 0usize;
+    let mut skipped_active = 0usize;
+    let mut skipped_completed = 0usize;
+    let mut skipped_previous_failed = 0usize;
+    let mut skipped_limit = 0usize;
+    let mut planned_items = Vec::new();
+    let mut dataset_counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    for dataset in sorted_datasets {
+        let slug = value_str(dataset, "slug").to_string();
+        if let Some(filter) = dataset_filter {
+            if slug != filter {
+                continue;
+            }
+        }
+        let dataset_title = dataset
+            .get("dataset")
+            .and_then(|metadata| metadata.get("title"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(&slug)
+            .to_string();
+        let assets = dataset
+            .get("assets")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("Dataset {} has no asset list in the index queue.", slug))?;
+
+        for asset in assets {
+            let command_display = asset
+                .get(command_key)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty());
+            let Some(command_display) = command_display else {
+                continue;
+            };
+            candidate_count += 1;
+
+            let asset_relative_path = value_str(asset, "relative_path").to_string();
+            let existing_status = latest_index_job_status(jobs, kind, &slug, &asset_relative_path);
+            if existing_status
+                .as_deref()
+                .map(is_active_index_status)
+                .unwrap_or(false)
+            {
+                skipped_active += 1;
+                continue;
+            }
+            if skip_completed && existing_status.as_deref() == Some("completed") {
+                skipped_completed += 1;
+                continue;
+            }
+            if matches!(existing_status.as_deref(), Some("failed" | "cancelled")) && !retry_failed {
+                skipped_previous_failed += 1;
+                continue;
+            }
+            let dataset_count = dataset_counts.get(&slug).copied().unwrap_or(0);
+            if planned_items.len() >= total_limit || dataset_count >= per_dataset_limit {
+                skipped_limit += 1;
+                continue;
+            }
+
+            dataset_counts.insert(slug.clone(), dataset_count + 1);
+            planned_items.push(serde_json::json!({
+                "kind": kind,
+                "dataset_slug": slug,
+                "dataset_title": dataset_title,
+                "asset_relative_path": asset_relative_path,
+                "format": asset.get("format").cloned().unwrap_or(Value::Null),
+                "size_bytes": asset.get("size_bytes").cloned().unwrap_or(Value::Null),
+                "dimensions": asset.get("dimensions").cloned().unwrap_or(Value::Null),
+                "index_status": value_str(asset, "index_status"),
+                "existing_job_status": existing_status,
+                "command_display": command_display,
+                "start_request": {
+                    "kind": kind,
+                    "dataset_slug": value_str(dataset, "slug"),
+                    "asset_relative_path": value_str(asset, "relative_path")
+                }
+            }));
+        }
+    }
+
+    let plan_id = format!("index_batch_plan_{}", now_ms());
+    Ok(serde_json::json!({
+        "plan_id": plan_id,
+        "created_at_ms": now_ms(),
+        "root": queue.get("root").cloned().unwrap_or(Value::Null),
+        "kind": kind,
+        "dataset_slug": dataset_filter,
+        "total_limit": total_limit,
+        "per_dataset_limit": per_dataset_limit,
+        "retry_failed": retry_failed,
+        "skip_completed": skip_completed,
+        "summary": {
+            "candidate_count": candidate_count,
+            "planned_count": planned_items.len(),
+            "skipped_active": skipped_active,
+            "skipped_completed": skipped_completed,
+            "skipped_previous_failed": skipped_previous_failed,
+            "skipped_limit": skipped_limit,
+            "datasets": dataset_counts.len()
+        },
+        "items": planned_items,
+        "checkpoint": {
+            "schema": "cell-anatomy-index-batch-plan",
+            "schema_version": 1,
+            "plan_id": plan_id,
+            "kind": kind,
+            "dataset_slug": dataset_filter,
+            "total_limit": total_limit,
+            "per_dataset_limit": per_dataset_limit,
+            "retry_failed": retry_failed,
+            "skip_completed": skip_completed,
+            "planned_keys": planned_items.iter().map(|item| {
+                serde_json::json!({
+                    "dataset_slug": item.get("dataset_slug").cloned().unwrap_or(Value::Null),
+                    "asset_relative_path": item.get("asset_relative_path").cloned().unwrap_or(Value::Null)
+                })
+            }).collect::<Vec<_>>()
+        }
+    }))
+}
+
+fn summarize_index_batch_items(items: &[IndexBatchRunItem]) -> IndexBatchRunSummary {
+    let mut summary = IndexBatchRunSummary {
+        total: items.len(),
+        pending: 0,
+        queued: 0,
+        running: 0,
+        completed: 0,
+        failed: 0,
+        cancelled: 0,
+    };
+
+    for item in items {
+        match item.status.as_str() {
+            "pending" => summary.pending += 1,
+            "queued" => summary.queued += 1,
+            "running" | "cancel_requested" => summary.running += 1,
+            "completed" => summary.completed += 1,
+            "failed" => summary.failed += 1,
+            "cancelled" => summary.cancelled += 1,
+            _ => summary.pending += 1,
+        }
+    }
+
+    summary
+}
+
+fn is_active_batch_run_status(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "cancel_requested")
+}
+
+fn is_terminal_batch_run_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+fn persist_index_batch_run(record: &IndexBatchRunRecord) -> Result<(), String> {
+    let path = PathBuf::from(&record.checkpoint_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Index batch checkpoint path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "Failed to create batch checkpoint directory {:?}: {}",
+            parent, err
+        )
+    })?;
+    let mut file = File::create(&path)
+        .map_err(|err| format!("Failed to create batch checkpoint {:?}: {}", path, err))?;
+    let payload = serde_json::to_string_pretty(record)
+        .map_err(|err| format!("Failed to serialize batch checkpoint: {}", err))?;
+    file.write_all(payload.as_bytes())
+        .map_err(|err| format!("Failed to write batch checkpoint {:?}: {}", path, err))
+}
+
+fn load_index_batch_runs() -> BTreeMap<String, IndexBatchRunRecord> {
+    let dir = get_index_batch_runs_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return BTreeMap::new(),
+    };
+    let mut runs = BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("Failed to open batch checkpoint {:?}: {}", path, err);
+                continue;
+            }
+        };
+        let mut record = match serde_json::from_reader::<_, IndexBatchRunRecord>(file) {
+            Ok(record) => record,
+            Err(err) => {
+                eprintln!("Failed to parse batch checkpoint {:?}: {}", path, err);
+                continue;
+            }
+        };
+        if record.checkpoint_path.trim().is_empty() {
+            record.checkpoint_path = path.to_string_lossy().into_owned();
+        }
+        if is_active_batch_run_status(&record.status) {
+            let loaded_at = now_ms();
+            record.status = "paused".to_string();
+            record.updated_at_ms = loaded_at;
+            record.finished_at_ms = None;
+            record.log.push(
+                "Loaded persisted checkpoint; resume to continue interrupted work.".to_string(),
+            );
+            for item in &mut record.items {
+                if is_active_index_status(&item.status) {
+                    item.status = "pending".to_string();
+                    item.job_id = None;
+                    item.started_at_ms = None;
+                    item.finished_at_ms = None;
+                    item.error =
+                        Some("Interrupted before completion; resume required.".to_string());
+                }
+            }
+            record.summary = summarize_index_batch_items(&record.items);
+            if let Err(err) = persist_index_batch_run(&record) {
+                eprintln!(
+                    "Failed to persist paused batch checkpoint {:?}: {}",
+                    path, err
+                );
+            }
+        }
+        runs.insert(record.id.clone(), record);
+    }
+    runs
+}
+
+fn batch_plan_item_start_request(item: &Value) -> Result<StartIndexJobRequest, String> {
+    let start_request = item.get("start_request").unwrap_or(item);
+    let kind = start_request
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .or_else(|| item.get("kind").and_then(|value| value.as_str()))
+        .ok_or_else(|| "Batch plan item is missing kind.".to_string())?;
+    let kind = normalize_index_job_kind(kind).ok_or_else(|| {
+        "Batch plan item has unsupported kind. Use convert or slices.".to_string()
+    })?;
+    let dataset_slug = start_request
+        .get("dataset_slug")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Batch plan item is missing dataset_slug.".to_string())?;
+    let asset_relative_path = start_request
+        .get("asset_relative_path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Batch plan item is missing asset_relative_path.".to_string())?;
+
+    Ok(StartIndexJobRequest {
+        kind: kind.to_string(),
+        dataset_slug: dataset_slug.to_string(),
+        asset_relative_path: asset_relative_path.to_string(),
+    })
+}
+
+fn build_index_batch_run_from_plan(
+    plan: &Value,
+    concurrency: Option<usize>,
+) -> Result<IndexBatchRunRecord, String> {
+    let plan_id = plan
+        .get("plan_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Batch run request is missing plan_id.".to_string())?
+        .to_string();
+    let kind = plan
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .and_then(normalize_index_job_kind)
+        .ok_or_else(|| {
+            "Batch run request has unsupported kind. Use convert or slices.".to_string()
+        })?;
+    let root = plan
+        .get("root")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let items = plan
+        .get("items")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Batch run request is missing plan items.".to_string())?;
+    if items.is_empty() {
+        return Err("Batch run request has no plan items.".to_string());
+    }
+
+    let mut run_items = Vec::with_capacity(items.len());
+    for item in items {
+        let request = batch_plan_item_start_request(item)?;
+        if request.kind != kind {
+            return Err("Batch run plan mixes job kinds; build one run per kind.".to_string());
+        }
+        run_items.push(IndexBatchRunItem {
+            kind: request.kind,
+            dataset_slug: request.dataset_slug,
+            dataset_title: item
+                .get("dataset_title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            asset_relative_path: request.asset_relative_path,
+            command_display: item
+                .get("command_display")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            status: "pending".to_string(),
+            job_id: None,
+            existing_job_status: item
+                .get("existing_job_status")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string()),
+            started_at_ms: None,
+            finished_at_ms: None,
+            error: None,
+        });
+    }
+
+    let run_id = unique_local_id("index_batch_run");
+    let created_at_ms = now_ms();
+    let mut record = IndexBatchRunRecord {
+        id: run_id.clone(),
+        plan_id,
+        kind: kind.to_string(),
+        root,
+        status: "queued".to_string(),
+        concurrency: concurrency.unwrap_or(1).clamp(1, 8),
+        created_at_ms,
+        updated_at_ms: created_at_ms,
+        finished_at_ms: None,
+        checkpoint_path: get_index_batch_run_path(&run_id)
+            .to_string_lossy()
+            .into_owned(),
+        summary: IndexBatchRunSummary {
+            total: 0,
+            pending: 0,
+            queued: 0,
+            running: 0,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+        },
+        items: run_items,
+        log: Vec::new(),
+        error: None,
+    };
+    record.summary = summarize_index_batch_items(&record.items);
+    record.log.push(format!(
+        "Queued persisted batch run with {} item{} at concurrency {}.",
+        record.summary.total,
+        if record.summary.total == 1 { "" } else { "s" },
+        record.concurrency
+    ));
+    Ok(record)
+}
+
+fn reconcile_index_batch_items(
+    record: &mut IndexBatchRunRecord,
+    jobs: &BTreeMap<String, IndexJobRecord>,
+) {
+    for item in &mut record.items {
+        if !is_active_index_status(&item.status) {
+            continue;
+        }
+        let Some(job_id) = item.job_id.as_ref() else {
+            continue;
+        };
+        let Some(job) = jobs.get(job_id) else {
+            continue;
+        };
+        item.status = job.status.clone();
+        item.started_at_ms = job.started_at_ms.or(item.started_at_ms);
+        if !is_active_index_status(&job.status) {
+            item.finished_at_ms = job.finished_at_ms.or_else(|| Some(now_ms()));
+            item.error = job.error.clone();
+        }
+    }
+}
+
+fn prepare_index_batch_resume(
+    record: &mut IndexBatchRunRecord,
+    retry_failed: bool,
+) -> Result<(), String> {
+    if is_active_batch_run_status(&record.status) {
+        return Err(format!("Cannot resume a {} batch run.", record.status));
+    }
+
+    let mut pending_count = 0usize;
+    for item in &mut record.items {
+        let should_resume = matches!(
+            item.status.as_str(),
+            "pending" | "queued" | "running" | "cancel_requested"
+        ) || (retry_failed
+            && matches!(item.status.as_str(), "failed" | "cancelled"));
+        if should_resume {
+            item.status = "pending".to_string();
+            item.job_id = None;
+            item.started_at_ms = None;
+            item.finished_at_ms = None;
+            item.error = None;
+            pending_count += 1;
+        }
+    }
+
+    if pending_count == 0 {
+        return Err("Batch run has no pending items to resume.".to_string());
+    }
+
+    let resumed_at = now_ms();
+    record.status = "queued".to_string();
+    record.updated_at_ms = resumed_at;
+    record.finished_at_ms = None;
+    record.error = None;
+    record.summary = summarize_index_batch_items(&record.items);
+    record.log.push(format!(
+        "Resume requested for {} item{}{}.",
+        pending_count,
+        if pending_count == 1 { "" } else { "s" },
+        if retry_failed {
+            " including failed or cancelled work"
+        } else {
+            ""
+        }
+    ));
+    Ok(())
+}
+
+fn append_index_job_log(
+    jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    job_id: &str,
+    line: String,
+) {
     if line.trim().is_empty() {
         return;
     }
@@ -576,8 +1231,11 @@ fn append_index_job_log(jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job
     }
 }
 
-fn update_index_job<F>(jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: &str, mut updater: F)
-where
+fn update_index_job<F>(
+    jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    job_id: &str,
+    mut updater: F,
+) where
     F: FnMut(&mut IndexJobRecord),
 {
     if let Ok(mut guard) = jobs.lock() {
@@ -587,9 +1245,12 @@ where
     }
 }
 
-fn start_index_job(state: &AppState, request: StartIndexJobRequest) -> Result<IndexJobRecord, String> {
+fn start_index_job(
+    state: &AppState,
+    request: StartIndexJobRequest,
+) -> Result<IndexJobRecord, String> {
     let (kind, command, command_display, repo_root) = resolve_index_job_command(&request)?;
-    let id = format!("index_job_{}", now_ms());
+    let id = unique_local_id("index_job");
     let record = IndexJobRecord {
         id: id.clone(),
         kind,
@@ -608,7 +1269,10 @@ fn start_index_job(state: &AppState, request: StartIndexJobRequest) -> Result<In
     };
 
     {
-        let mut guard = state.index_jobs.lock().map_err(|_| "Index job registry is unavailable.".to_string())?;
+        let mut guard = state
+            .index_jobs
+            .lock()
+            .map_err(|_| "Index job registry is unavailable.".to_string())?;
         guard.insert(id.clone(), record.clone());
     }
 
@@ -620,8 +1284,187 @@ fn start_index_job(state: &AppState, request: StartIndexJobRequest) -> Result<In
     Ok(record)
 }
 
-async fn read_process_lines<R>(jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>, job_id: String, source: &'static str, stream: R)
-where
+fn mark_index_job_cancel_requested(
+    jobs: &Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    job_id: &str,
+) -> Result<Option<u32>, String> {
+    let mut guard = jobs
+        .lock()
+        .map_err(|_| "Index job registry is unavailable.".to_string())?;
+    let job = guard
+        .get_mut(job_id)
+        .ok_or_else(|| "Index job not found.".to_string())?;
+    match job.status.as_str() {
+        "queued" | "running" => {
+            job.status = "cancel_requested".to_string();
+            job.log.push("Cancellation requested.".to_string());
+            Ok(job.pid)
+        }
+        "cancel_requested" => Ok(job.pid),
+        _ => Err(format!("Cannot cancel a {} job.", job.status)),
+    }
+}
+
+fn kill_process(pid: u32) {
+    let _ = StdCommand::new("kill").arg(pid.to_string()).status();
+}
+
+async fn run_index_batch_runner(state: AppState, run_id: String) {
+    loop {
+        let (child_jobs_to_cancel, terminal) = {
+            let jobs_snapshot = state
+                .index_jobs
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            let mut child_jobs_to_cancel = Vec::new();
+            let mut runs = match state.index_batch_runs.lock() {
+                Ok(runs) => runs,
+                Err(_) => return,
+            };
+            let Some(record) = runs.get_mut(&run_id) else {
+                return;
+            };
+
+            reconcile_index_batch_items(record, &jobs_snapshot);
+            let checkpoint_at = now_ms();
+
+            if record.status == "cancel_requested" {
+                for item in &mut record.items {
+                    match item.status.as_str() {
+                        "pending" => {
+                            item.status = "cancelled".to_string();
+                            item.finished_at_ms = Some(checkpoint_at);
+                        }
+                        "queued" | "running" | "cancel_requested" => {
+                            if let Some(job_id) = &item.job_id {
+                                item.status = "cancel_requested".to_string();
+                                child_jobs_to_cancel.push(job_id.clone());
+                            } else {
+                                item.status = "cancelled".to_string();
+                                item.finished_at_ms = Some(checkpoint_at);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                record.status = "running".to_string();
+                let mut active_count = record
+                    .items
+                    .iter()
+                    .filter(|item| is_active_index_status(&item.status))
+                    .count();
+                while active_count < record.concurrency {
+                    let Some(item_index) = record
+                        .items
+                        .iter()
+                        .position(|item| item.status == "pending")
+                    else {
+                        break;
+                    };
+
+                    let request = {
+                        let item = &record.items[item_index];
+                        StartIndexJobRequest {
+                            kind: item.kind.clone(),
+                            dataset_slug: item.dataset_slug.clone(),
+                            asset_relative_path: item.asset_relative_path.clone(),
+                        }
+                    };
+                    match start_index_job(&state, request) {
+                        Ok(job) => {
+                            let item = &mut record.items[item_index];
+                            item.status = job.status.clone();
+                            item.job_id = Some(job.id.clone());
+                            item.started_at_ms = Some(job.created_at_ms);
+                            item.finished_at_ms = None;
+                            item.error = None;
+                            if item.command_display.trim().is_empty() {
+                                item.command_display = job.command_display.clone();
+                            }
+                            record.log.push(format!(
+                                "Started {} for {} as {}.",
+                                item.kind, item.asset_relative_path, job.id
+                            ));
+                            active_count += 1;
+                        }
+                        Err(error) => {
+                            let item = &mut record.items[item_index];
+                            item.status = "failed".to_string();
+                            item.finished_at_ms = Some(now_ms());
+                            item.error = Some(error.clone());
+                            record.log.push(format!(
+                                "Failed to start {} for {}: {}",
+                                item.kind, item.asset_relative_path, error
+                            ));
+                        }
+                    }
+                }
+            }
+
+            record.summary = summarize_index_batch_items(&record.items);
+            record.updated_at_ms = now_ms();
+            let unfinished =
+                record.summary.pending + record.summary.queued + record.summary.running;
+            if record.status == "cancel_requested" {
+                if unfinished == 0 {
+                    record.status = "cancelled".to_string();
+                    record.finished_at_ms = Some(record.updated_at_ms);
+                    record.log.push("Batch run cancelled.".to_string());
+                }
+            } else if unfinished == 0 {
+                record.finished_at_ms = Some(record.updated_at_ms);
+                if record.summary.failed > 0 {
+                    record.status = "failed".to_string();
+                    record.error = Some(format!(
+                        "{} of {} batch item{} failed.",
+                        record.summary.failed,
+                        record.summary.total,
+                        if record.summary.total == 1 { "" } else { "s" }
+                    ));
+                    record
+                        .log
+                        .push("Batch run finished with failed items.".to_string());
+                } else if record.summary.cancelled > 0 {
+                    record.status = "cancelled".to_string();
+                    record
+                        .log
+                        .push("Batch run finished with cancelled items.".to_string());
+                } else {
+                    record.status = "completed".to_string();
+                    record.log.push("Batch run completed.".to_string());
+                }
+            }
+
+            let terminal = is_terminal_batch_run_status(&record.status);
+            if let Err(err) = persist_index_batch_run(record) {
+                eprintln!("Failed to persist batch run {}: {}", record.id, err);
+            }
+            (child_jobs_to_cancel, terminal)
+        };
+
+        for job_id in child_jobs_to_cancel {
+            if let Ok(pid) = mark_index_job_cancel_requested(&state.index_jobs, &job_id) {
+                if let Some(pid) = pid {
+                    kill_process(pid);
+                }
+            }
+        }
+
+        if terminal {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+}
+
+async fn read_process_lines<R>(
+    jobs: Arc<Mutex<BTreeMap<String, IndexJobRecord>>>,
+    job_id: String,
+    source: &'static str,
+    stream: R,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(stream).lines();
@@ -640,7 +1483,11 @@ async fn run_index_job(
         let guard = jobs.lock();
         guard
             .ok()
-            .and_then(|guard| guard.get(&job_id).map(|job| job.status == "cancel_requested"))
+            .and_then(|guard| {
+                guard
+                    .get(&job_id)
+                    .map(|job| job.status == "cancel_requested")
+            })
             .unwrap_or(false)
     };
     if should_cancel {
@@ -726,11 +1573,16 @@ async fn run_index_job(
                 } else {
                     job.status = "failed".to_string();
                     job.error = Some(format!("Process exited with status {}", status));
-                    job.log.push(format!("Process exited with status {}.", status));
+                    job.log
+                        .push(format!("Process exited with status {}.", status));
                 }
             }
             Err(error) => {
-                job.status = if was_cancel_requested { "cancelled".to_string() } else { "failed".to_string() };
+                job.status = if was_cancel_requested {
+                    "cancelled".to_string()
+                } else {
+                    "failed".to_string()
+                };
                 job.error = Some(error.to_string());
                 job.log.push(format!("Process wait failed: {}", error));
             }
@@ -814,19 +1666,34 @@ fn local_zarr_compatibility_report(
     if let Some(config) = zarray {
         checks.insert("shape_is_3d".to_string(), config.shape.len() == 3);
         checks.insert("chunks_are_3d".to_string(), config.chunks.len() == 3);
-        checks.insert("dtype_supported".to_string(), zarr_dtype_elem_size(&config.dtype).is_some());
+        checks.insert(
+            "dtype_supported".to_string(),
+            zarr_dtype_elem_size(&config.dtype).is_some(),
+        );
         checks.insert(
             "uncompressed_chunks".to_string(),
-            config.compressor.as_ref().map_or(true, |compressor| compressor.is_null()),
+            config
+                .compressor
+                .as_ref()
+                .map_or(true, |compressor| compressor.is_null()),
         );
-        checks.insert("filters_supported".to_string(), zarray_has_no_filters(&config.filters));
+        checks.insert(
+            "filters_supported".to_string(),
+            zarray_has_no_filters(&config.filters),
+        );
         checks.insert(
             "row_major_order".to_string(),
-            config.order.as_deref().map_or(true, |order| order.eq_ignore_ascii_case("C")),
+            config
+                .order
+                .as_deref()
+                .map_or(true, |order| order.eq_ignore_ascii_case("C")),
         );
         checks.insert(
             "dot_chunk_keys".to_string(),
-            config.dimension_separator.as_deref().map_or(true, |separator| separator == "."),
+            config
+                .dimension_separator
+                .as_deref()
+                .map_or(true, |separator| separator == "."),
         );
         checks.insert(
             "zarr_v2".to_string(),
@@ -913,7 +1780,8 @@ fn locate_zarr_derivative(dataset: &str, asset_path: &str) -> Option<DerivativeE
                 if slug == dataset {
                     if let Some(derivatives) = val.get("derivatives").and_then(|d| d.as_array()) {
                         for d in derivatives {
-                            if let Ok(entry) = serde_json::from_value::<DerivativeEntry>(d.clone()) {
+                            if let Ok(entry) = serde_json::from_value::<DerivativeEntry>(d.clone())
+                            {
                                 if entry.source_relative_path == asset_path {
                                     return Some(entry);
                                 }
@@ -963,12 +1831,7 @@ fn parse_zarray(zattrs_dir: &Path) -> Option<Zarray> {
 async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
     let entry = match locate_zarr_derivative(&params.dataset, &params.asset) {
         Some(e) => e,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                "Dataset or derivative not found",
-            ).into_response()
-        }
+        None => return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response(),
     };
 
     let zarr_dir = PathBuf::from(&entry.output_path);
@@ -978,7 +1841,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to parse .zarray metadata",
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -988,7 +1852,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Invalid OME-Zarr array shape/chunks dimensions",
-        ).into_response();
+        )
+            .into_response();
     }
 
     let (z_max, y_max, x_max) = (shape[0], shape[1], shape[2]);
@@ -1001,7 +1866,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Unsupported Zarr dtype: {}", zarr_config.dtype),
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -1014,7 +1880,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
                 return (
                     StatusCode::BAD_REQUEST,
                     format!("Slice index {} out of range [0, {}]", slice_idx, z_max - 1),
-                ).into_response();
+                )
+                    .into_response();
             }
             let mut out_buffer = vec![0u8; y_max * x_max * elem_size];
             let zc = slice_idx / cz;
@@ -1049,7 +1916,9 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
 
                                     let len_to_copy = x_len * elem_size;
                                     out_buffer[dest_offset..(dest_offset + len_to_copy)]
-                                        .copy_from_slice(&chunk_data[src_offset..(src_offset + len_to_copy)]);
+                                        .copy_from_slice(
+                                            &chunk_data[src_offset..(src_offset + len_to_copy)],
+                                        );
                                 }
                             }
                         }
@@ -1063,7 +1932,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
                 return (
                     StatusCode::BAD_REQUEST,
                     format!("Slice index {} out of range [0, {}]", slice_idx, y_max - 1),
-                ).into_response();
+                )
+                    .into_response();
             }
             let mut out_buffer = vec![0u8; z_max * x_max * elem_size];
             let yc = slice_idx / cy;
@@ -1090,14 +1960,17 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
                             let mut chunk_data = vec![0u8; chunk_bytes_expected];
                             if f.read_exact(&mut chunk_data).is_ok() {
                                 for lz in 0..z_len {
-                                    let src_offset = ((lz * y_len * x_len) + (yo * x_len)) * elem_size;
+                                    let src_offset =
+                                        ((lz * y_len * x_len) + (yo * x_len)) * elem_size;
                                     let dest_z = (zc * cz) + lz;
                                     let dest_x = xc * cx;
                                     let dest_offset = ((dest_z * x_max) + dest_x) * elem_size;
 
                                     let len_to_copy = x_len * elem_size;
                                     out_buffer[dest_offset..(dest_offset + len_to_copy)]
-                                        .copy_from_slice(&chunk_data[src_offset..(src_offset + len_to_copy)]);
+                                        .copy_from_slice(
+                                            &chunk_data[src_offset..(src_offset + len_to_copy)],
+                                        );
                                 }
                             }
                         }
@@ -1111,7 +1984,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
                 return (
                     StatusCode::BAD_REQUEST,
                     format!("Slice index {} out of range [0, {}]", slice_idx, x_max - 1),
-                ).into_response();
+                )
+                    .into_response();
             }
             let mut out_buffer = vec![0u8; z_max * y_max * elem_size];
             let xc = slice_idx / cx;
@@ -1139,13 +2013,16 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
                             if f.read_exact(&mut chunk_data).is_ok() {
                                 for lz in 0..z_len {
                                     for ly in 0..y_len {
-                                        let src_offset = ((lz * y_len * x_len) + (ly * x_len) + xo) * elem_size;
+                                        let src_offset =
+                                            ((lz * y_len * x_len) + (ly * x_len) + xo) * elem_size;
                                         let dest_z = (zc * cz) + lz;
                                         let dest_y = (yc * cy) + ly;
                                         let dest_offset = ((dest_z * y_max) + dest_y) * elem_size;
 
                                         out_buffer[dest_offset..(dest_offset + elem_size)]
-                                            .copy_from_slice(&chunk_data[src_offset..(src_offset + elem_size)]);
+                                            .copy_from_slice(
+                                                &chunk_data[src_offset..(src_offset + elem_size)],
+                                            );
                                     }
                                 }
                             }
@@ -1159,7 +2036,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
             return (
                 StatusCode::BAD_REQUEST,
                 "Invalid axis parameter. Must be 'z', 'y', or 'x'",
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -1178,7 +2056,8 @@ async fn handle_slice(Query(params): Query<SliceParams>) -> impl IntoResponse {
     );
     headers.insert(
         header::HeaderName::from_static("x-dtype"),
-        header::HeaderValue::from_str(&zarr_config.dtype).unwrap_or(header::HeaderValue::from_static("uint8")),
+        header::HeaderValue::from_str(&zarr_config.dtype)
+            .unwrap_or(header::HeaderValue::from_static("uint8")),
     );
     if let Some(voxel_size_z) = entry.physical_voxel_size_nm.get("z") {
         headers.insert(
@@ -1221,12 +2100,7 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
 
     let entry = match locate_zarr_derivative(&params.dataset, &params.asset) {
         Some(e) => e,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                "Dataset or derivative not found",
-            ).into_response()
-        }
+        None => return (StatusCode::NOT_FOUND, "Dataset or derivative not found").into_response(),
     };
 
     let zarr_dir = PathBuf::from(&entry.output_path);
@@ -1236,7 +2110,8 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to parse .zarray metadata",
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -1246,7 +2121,8 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Invalid OME-Zarr array shape/chunks dimensions",
-        ).into_response();
+        )
+            .into_response();
     }
 
     let (z_max, y_max, x_max) = (shape[0], shape[1], shape[2]);
@@ -1259,7 +2135,8 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Unsupported Zarr dtype: {}", zarr_config.dtype),
-            ).into_response()
+            )
+                .into_response()
         }
     };
 
@@ -1278,7 +2155,7 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
     for zc in 0..z_chunks {
         let z_start = zc * cz;
         let z_end = std::cmp::min(z_start + cz, z_max);
-        
+
         // Find first Z in this chunk matching stride
         let first_z = ((z_start + downsample - 1) / downsample) * downsample;
         if first_z >= z_end {
@@ -1288,7 +2165,7 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
         for yc in 0..y_chunks {
             let y_start = yc * cy;
             let y_end = std::cmp::min(y_start + cy, y_max);
-            
+
             // Find first Y in this chunk matching stride
             let first_y = ((y_start + downsample - 1) / downsample) * downsample;
             if first_y >= y_end {
@@ -1298,7 +2175,7 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
             for xc in 0..x_chunks {
                 let x_start = xc * cx;
                 let x_end = std::cmp::min(x_start + cx, x_max);
-                
+
                 // Find first X in this chunk matching stride
                 let first_x = ((x_start + downsample - 1) / downsample) * downsample;
                 if first_x >= x_end {
@@ -1325,22 +2202,26 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
                             while z < z_end {
                                 let sz = z / downsample;
                                 let zo = z - z_start;
-                                
+
                                 let mut y = first_y;
                                 while y < y_end {
                                     let sy = y / downsample;
                                     let yo = y - y_start;
-                                    
+
                                     let mut x = first_x;
                                     while x < x_end {
                                         let sx = x / downsample;
                                         let xo = x - x_start;
 
-                                        let src_offset = ((zo * y_len * x_len) + (yo * x_len) + xo) * elem_size;
-                                        let dest_offset = ((sz * dy * dx) + (sy * dx) + sx) * elem_size;
+                                        let src_offset =
+                                            ((zo * y_len * x_len) + (yo * x_len) + xo) * elem_size;
+                                        let dest_offset =
+                                            ((sz * dy * dx) + (sy * dx) + sx) * elem_size;
 
                                         out_buffer[dest_offset..(dest_offset + elem_size)]
-                                            .copy_from_slice(&chunk_data[src_offset..(src_offset + elem_size)]);
+                                            .copy_from_slice(
+                                                &chunk_data[src_offset..(src_offset + elem_size)],
+                                            );
 
                                         x += downsample;
                                     }
@@ -1374,7 +2255,8 @@ async fn handle_volume_3d(Query(params): Query<Volume3DParams>) -> impl IntoResp
     );
     headers.insert(
         header::HeaderName::from_static("x-dtype"),
-        header::HeaderValue::from_str(&zarr_config.dtype).unwrap_or(header::HeaderValue::from_static("uint8")),
+        header::HeaderValue::from_str(&zarr_config.dtype)
+            .unwrap_or(header::HeaderValue::from_static("uint8")),
     );
     if let Some(voxel_size_z) = entry.physical_voxel_size_nm.get("z") {
         headers.insert(
@@ -1410,12 +2292,19 @@ fn parse_voxel_size_with_status(path: &Path) -> (Value, bool) {
             if let Ok(zattrs) = serde_json::from_reader::<_, Value>(file) {
                 if let Some(multiscales) = zattrs.get("multiscales").and_then(|m| m.as_array()) {
                     if let Some(first_ms) = multiscales.first() {
-                        if let Some(datasets) = first_ms.get("datasets").and_then(|d| d.as_array()) {
+                        if let Some(datasets) = first_ms.get("datasets").and_then(|d| d.as_array())
+                        {
                             if let Some(first_ds) = datasets.first() {
-                                if let Some(transforms) = first_ds.get("coordinateTransformations").and_then(|t| t.as_array()) {
+                                if let Some(transforms) = first_ds
+                                    .get("coordinateTransformations")
+                                    .and_then(|t| t.as_array())
+                                {
                                     for t in transforms {
-                                        if t.get("type").and_then(|ty| ty.as_str()) == Some("scale") {
-                                            if let Some(scale) = t.get("scale").and_then(|s| s.as_array()) {
+                                        if t.get("type").and_then(|ty| ty.as_str()) == Some("scale")
+                                        {
+                                            if let Some(scale) =
+                                                t.get("scale").and_then(|s| s.as_array())
+                                            {
                                                 if scale.len() == 3 {
                                                     return (
                                                         serde_json::json!({
@@ -1464,8 +2353,10 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
                 "success": false,
                 "error": format!("Path does not exist: {}", params.path),
                 "compatibility": compatibility
-            })).unwrap()
-        ).into_response();
+            }))
+            .unwrap(),
+        )
+            .into_response();
     }
 
     let (zarr_root, array_path, zarray_path) = match resolve_local_zarr_array(&path) {
@@ -1479,15 +2370,18 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
                     "success": false,
                     "error": "No .zarray file found at the root or within resolution group '0'",
                     "compatibility": compatibility
-                })).unwrap()
-            ).into_response();
+                }))
+                .unwrap(),
+            )
+                .into_response();
         }
     };
 
     let zarr_config = match read_zarray_file(&zarray_path) {
         Ok(config) => config,
         Err(e) => {
-            let compatibility = local_zarr_compatibility_report(&path, Some(&array_path), None, false);
+            let compatibility =
+                local_zarr_compatibility_report(&path, Some(&array_path), None, false);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
@@ -1495,8 +2389,10 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
                     "success": false,
                     "error": e,
                     "compatibility": compatibility
-                })).unwrap()
-            ).into_response();
+                }))
+                .unwrap(),
+            )
+                .into_response();
         }
     };
 
@@ -1508,7 +2404,11 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
         voxel_size_found,
     );
 
-    if compatibility.get("status").and_then(|status| status.as_str()) == Some("unsupported") {
+    if compatibility
+        .get("status")
+        .and_then(|status| status.as_str())
+        == Some("unsupported")
+    {
         return (
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "application/json")],
@@ -1519,11 +2419,14 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
                     .and_then(|summary| summary.as_str())
                     .unwrap_or("Local Zarr is not compatible with the current reader."),
                 "compatibility": compatibility
-            })).unwrap()
-        ).into_response();
+            }))
+            .unwrap(),
+        )
+            .into_response();
     }
 
-    let folder_name = zarr_root.file_name()
+    let folder_name = zarr_root
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unnamed")
         .to_string();
@@ -1603,8 +2506,10 @@ async fn handle_open_local(Query(params): Query<OpenLocalParams>) -> impl IntoRe
             "persisted": persisted,
             "registry_path": get_custom_dataset_registry_path().to_string_lossy(),
             "persistence_error": persistence_error
-        })).unwrap()
-    ).into_response()
+        }))
+        .unwrap(),
+    )
+        .into_response()
 }
 
 async fn handle_index_queue() -> impl IntoResponse {
@@ -1612,7 +2517,8 @@ async fn handle_index_queue() -> impl IntoResponse {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&pilot_index_queue_payload()).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_list_index_jobs(State(state): State<AppState>) -> impl IntoResponse {
@@ -1631,51 +2537,236 @@ async fn handle_start_index_job(
 ) -> impl IntoResponse {
     match start_index_job(&state, payload) {
         Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
-        Err(error) => json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": error })),
+        Err(error) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": error }),
+        ),
     }
+}
+
+async fn handle_index_batch_plan(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<IndexBatchPlanRequest>,
+) -> impl IntoResponse {
+    let queue = pilot_index_queue_payload();
+    let jobs = state
+        .index_jobs
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    match build_index_batch_plan(&queue, &jobs, &payload) {
+        Ok(plan) => json_response(StatusCode::OK, plan),
+        Err(error) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": error }),
+        ),
+    }
+}
+
+async fn handle_list_index_batch_runs(State(state): State<AppState>) -> impl IntoResponse {
+    let mut runs = state
+        .index_batch_runs
+        .lock()
+        .map(|guard| guard.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    runs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    json_response(StatusCode::OK, serde_json::json!({ "runs": runs }))
+}
+
+async fn handle_start_index_batch_run(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<StartIndexBatchRunRequest>,
+) -> impl IntoResponse {
+    let record = match build_index_batch_run_from_plan(&payload.plan, payload.concurrency) {
+        Ok(record) => record,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error }),
+            )
+        }
+    };
+    if let Err(error) = persist_index_batch_run(&record) {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "error": error }),
+        );
+    }
+    {
+        let mut runs = match state.index_batch_runs.lock() {
+            Ok(runs) => runs,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "Index batch run registry is unavailable." }),
+                )
+            }
+        };
+        runs.insert(record.id.clone(), record.clone());
+    }
+
+    let run_id = record.id.clone();
+    let runner_state = state.clone();
+    tokio::spawn(async move {
+        run_index_batch_runner(runner_state, run_id).await;
+    });
+
+    json_response(StatusCode::ACCEPTED, serde_json::json!({ "run": record }))
+}
+
+async fn handle_cancel_index_batch_run(
+    AxumPath(run_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let mut child_jobs_to_cancel = Vec::new();
+    let record = {
+        let mut runs = match state.index_batch_runs.lock() {
+            Ok(runs) => runs,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "Index batch run registry is unavailable." }),
+                )
+            }
+        };
+        let record = match runs.get_mut(&run_id) {
+            Some(record) => record,
+            None => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "Index batch run not found." }),
+                )
+            }
+        };
+        if is_terminal_batch_run_status(&record.status) {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": format!("Cannot cancel a {} batch run.", record.status) }),
+            );
+        }
+
+        let cancelled_at = now_ms();
+        for item in &mut record.items {
+            match item.status.as_str() {
+                "pending" => {
+                    item.status = "cancelled".to_string();
+                    item.finished_at_ms = Some(cancelled_at);
+                }
+                "queued" | "running" | "cancel_requested" => {
+                    if let Some(job_id) = &item.job_id {
+                        item.status = "cancel_requested".to_string();
+                        child_jobs_to_cancel.push(job_id.clone());
+                    } else {
+                        item.status = "cancelled".to_string();
+                        item.finished_at_ms = Some(cancelled_at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        record.status = "cancel_requested".to_string();
+        record.updated_at_ms = cancelled_at;
+        record.summary = summarize_index_batch_items(&record.items);
+        if record.summary.running == 0 {
+            record.status = "cancelled".to_string();
+            record.finished_at_ms = Some(cancelled_at);
+        }
+        record.log.push("Batch cancellation requested.".to_string());
+        if let Err(error) = persist_index_batch_run(record) {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": error }),
+            );
+        }
+        record.clone()
+    };
+
+    for job_id in child_jobs_to_cancel {
+        if let Ok(pid) = mark_index_job_cancel_requested(&state.index_jobs, &job_id) {
+            if let Some(pid) = pid {
+                kill_process(pid);
+            }
+        }
+    }
+
+    json_response(StatusCode::OK, serde_json::json!({ "run": record }))
+}
+
+async fn handle_resume_index_batch_run(
+    AxumPath(run_id): AxumPath<String>,
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<ResumeIndexBatchRunRequest>,
+) -> impl IntoResponse {
+    let record = {
+        let mut runs = match state.index_batch_runs.lock() {
+            Ok(runs) => runs,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": "Index batch run registry is unavailable." }),
+                )
+            }
+        };
+        let record = match runs.get_mut(&run_id) {
+            Some(record) => record,
+            None => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "Index batch run not found." }),
+                )
+            }
+        };
+        if let Err(error) =
+            prepare_index_batch_resume(record, payload.retry_failed.unwrap_or(false))
+        {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error }),
+            );
+        }
+        if let Err(error) = persist_index_batch_run(record) {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": error }),
+            );
+        }
+        record.clone()
+    };
+
+    let runner_state = state.clone();
+    let runner_id = record.id.clone();
+    tokio::spawn(async move {
+        run_index_batch_runner(runner_state, runner_id).await;
+    });
+
+    json_response(StatusCode::ACCEPTED, serde_json::json!({ "run": record }))
 }
 
 async fn handle_cancel_index_job(
     AxumPath(job_id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let pid = {
-        let mut guard = match state.index_jobs.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                return json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({ "error": "Index job registry is unavailable." }),
-                )
-            }
-        };
-        let job = match guard.get_mut(&job_id) {
-            Some(job) => job,
-            None => {
-                return json_response(
-                    StatusCode::NOT_FOUND,
-                    serde_json::json!({ "error": "Index job not found." }),
-                )
-            }
-        };
-        match job.status.as_str() {
-            "queued" | "running" => {
-                job.status = "cancel_requested".to_string();
-                job.log.push("Cancellation requested.".to_string());
-                job.pid
-            }
-            "cancel_requested" => job.pid,
-            _ => {
-                return json_response(
-                    StatusCode::BAD_REQUEST,
-                    serde_json::json!({ "error": format!("Cannot cancel a {} job.", job.status) }),
-                )
-            }
+    let pid = match mark_index_job_cancel_requested(&state.index_jobs, &job_id) {
+        Ok(pid) => pid,
+        Err(error) if error == "Index job not found." => {
+            return json_response(StatusCode::NOT_FOUND, serde_json::json!({ "error": error }))
+        }
+        Err(error) if error == "Index job registry is unavailable." => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": error }),
+            )
+        }
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error }),
+            )
         }
     };
 
     if let Some(pid) = pid {
-        let _ = StdCommand::new("kill").arg(pid.to_string()).status();
+        kill_process(pid);
     }
     let job = state
         .index_jobs
@@ -1717,7 +2808,10 @@ async fn handle_retry_index_job(
 
     match start_index_job(&state, request) {
         Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
-        Err(error) => json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": error })),
+        Err(error) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": error }),
+        ),
     }
 }
 
@@ -1743,12 +2837,17 @@ async fn handle_workbench_data() -> impl IntoResponse {
                         };
 
                         // Load derivative manifest
-                        let deriv_path = root.join(slug).join("metadata").join("derivative-manifest.json");
+                        let deriv_path = root
+                            .join(slug)
+                            .join("metadata")
+                            .join("derivative-manifest.json");
                         let mut derivatives = Vec::new();
                         if deriv_path.exists() {
                             if let Ok(df) = File::open(&deriv_path) {
                                 if let Ok(dm) = serde_json::from_reader::<_, Value>(df) {
-                                    if let Some(deriv_arr) = dm.get("derivatives").and_then(|d| d.as_array()) {
+                                    if let Some(deriv_arr) =
+                                        dm.get("derivatives").and_then(|d| d.as_array())
+                                    {
                                         derivatives = deriv_arr.clone();
                                     }
                                 }
@@ -1761,12 +2860,17 @@ async fn handle_workbench_data() -> impl IntoResponse {
                         }
 
                         // Load advisory findings
-                        let advisory_path = root.join(slug).join("metadata").join("advisory-findings.json");
+                        let advisory_path = root
+                            .join(slug)
+                            .join("metadata")
+                            .join("advisory-findings.json");
                         let mut findings = Vec::new();
                         if advisory_path.exists() {
                             if let Ok(af) = File::open(&advisory_path) {
                                 if let Ok(am) = serde_json::from_reader::<_, Value>(af) {
-                                    if let Some(findings_arr) = am.get("findings").and_then(|f| f.as_array()) {
+                                    if let Some(findings_arr) =
+                                        am.get("findings").and_then(|f| f.as_array())
+                                    {
                                         findings = findings_arr.clone();
                                     }
                                 }
@@ -1775,10 +2879,22 @@ async fn handle_workbench_data() -> impl IntoResponse {
 
                         // Build packaged dataset entry
                         let dataset_meta = ds.get("dataset");
-                        let title = dataset_meta.and_then(|m| m.get("title")).and_then(|t| t.as_str()).unwrap_or(slug);
-                        let source = dataset_meta.and_then(|m| m.get("source")).and_then(|s| s.as_str()).unwrap_or("");
-                        let entry_id = dataset_meta.and_then(|m| m.get("entry_id")).and_then(|e| e.as_str()).unwrap_or("");
-                        let experiment_type = dataset_meta.and_then(|m| m.get("experiment_type")).and_then(|e| e.as_str()).unwrap_or("");
+                        let title = dataset_meta
+                            .and_then(|m| m.get("title"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or(slug);
+                        let source = dataset_meta
+                            .and_then(|m| m.get("source"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        let entry_id = dataset_meta
+                            .and_then(|m| m.get("entry_id"))
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("");
+                        let experiment_type = dataset_meta
+                            .and_then(|m| m.get("experiment_type"))
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("");
 
                         packaged_datasets.push(serde_json::json!({
                             "slug": slug,
@@ -1799,7 +2915,8 @@ async fn handle_workbench_data() -> impl IntoResponse {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&packaged_datasets).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 // ==========================================
@@ -1833,11 +2950,27 @@ fn derive_species(cell_type: &str, organism_type: &str) -> String {
 
 fn normalize_modality_family(modality: &str) -> String {
     let lowered = modality.to_lowercase();
-    if ["fib-sem", "sbf-sem", "sem", "electron", "cryo", "tem", "et"].iter().any(|&t| lowered.contains(t)) {
+    if ["fib-sem", "sbf-sem", "sem", "electron", "cryo", "tem", "et"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "EM".to_string()
-    } else if ["sxt", "x-ray", "stxm", "hxt"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["sxt", "x-ray", "stxm", "hxt"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "X-ray".to_string()
-    } else if ["optical", "fluorescence", "phase contrast", "diffraction", "lls", "sim"].iter().any(|&t| lowered.contains(t)) {
+    } else if [
+        "optical",
+        "fluorescence",
+        "phase contrast",
+        "diffraction",
+        "lls",
+        "sim",
+    ]
+    .iter()
+    .any(|&t| lowered.contains(t))
+    {
         "optical".to_string()
     } else {
         "other".to_string()
@@ -1948,15 +3081,30 @@ fn normalize_comparator(value: &str) -> (Option<String>, Option<String>) {
     let lowered = detail.to_lowercase();
     let class = if lowered.contains("cell cycle") {
         "cell cycle"
-    } else if ["glucose", "metabolic", "fed", "fasted"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["glucose", "metabolic", "fed", "fasted"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "metabolic condition"
-    } else if ["development", "stage", "differentiation", "young", "mature"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["development", "stage", "differentiation", "young", "mature"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "developmental stage"
-    } else if ["methodology", "resolution", "modality"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["methodology", "resolution", "modality"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "methodology"
-    } else if ["species", "cell type"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["species", "cell type"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "cell type"
-    } else if ["stress", "infection", "treatment", "mutant", "mutation"].iter().any(|&t| lowered.contains(t)) {
+    } else if ["stress", "infection", "treatment", "mutant", "mutation"]
+        .iter()
+        .any(|&t| lowered.contains(t))
+    {
         "treatment"
     } else {
         "other"
@@ -1992,7 +3140,11 @@ fn completeness_score(
     let mut score: f64 = 0.0;
     score += 0.2;
     score += 0.15;
-    score += if xy.is_some() || z.is_some() { 0.15 } else { 0.05 };
+    score += if xy.is_some() || z.is_some() {
+        0.15
+    } else {
+        0.05
+    };
     score += if !organelles.is_empty() { 0.2 } else { 0.0 };
     score += if !metrics.is_empty() { 0.1 } else { 0.0 };
     score += if sample_size.is_some() { 0.1 } else { 0.0 };
@@ -2006,7 +3158,10 @@ fn publication_url(pmid: &str, study_slug: &str) -> String {
     if !pmid_trimmed.is_empty() {
         format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid_trimmed)
     } else {
-        format!("https://github.com/mmirvis/Cell-Anatomy-Scoping-Review/tree/main#{}", study_slug)
+        format!(
+            "https://github.com/mmirvis/Cell-Anatomy-Scoping-Review/tree/main#{}",
+            study_slug
+        )
     }
 }
 
@@ -2089,7 +3244,11 @@ fn seed_database(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>
 
         let mut public_status = "none";
         if let Some(asset) = public_asset {
-            let scope_note = asset.get("availability_scope_note").cloned().unwrap_or_default().to_lowercase();
+            let scope_note = asset
+                .get("availability_scope_note")
+                .cloned()
+                .unwrap_or_default()
+                .to_lowercase();
             public_status = if scope_note.contains("full dataset provided") {
                 "complete"
             } else {
@@ -2105,7 +3264,10 @@ fn seed_database(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>
         let quantifications = study.get("quantifications").cloned().unwrap_or_default();
         let metrics = normalize_metric_families(&quantifications);
 
-        let comparators_conditions = study.get("comparators_conditions").cloned().unwrap_or_default();
+        let comparators_conditions = study
+            .get("comparators_conditions")
+            .cloned()
+            .unwrap_or_default();
         let (comparator_class, comparator_detail) = normalize_comparator(&comparators_conditions);
 
         let xy_nm = mean_numeric(&row.get("xy_nm").cloned().unwrap_or_default());
@@ -2124,11 +3286,21 @@ fn seed_database(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>
         let s_bucket = sample_size_bucket(sample_size);
 
         let organelles_common = row.get("organelles_common").cloned().unwrap_or_default();
-        let organelles_specialized = row.get("organelles_specialized").cloned().unwrap_or_default();
+        let organelles_specialized = row
+            .get("organelles_specialized")
+            .cloned()
+            .unwrap_or_default();
         let organelles = split_terms(&[&organelles_common, &organelles_specialized]);
         let organelle_pairs = build_pairs(&organelles);
 
-        let c_score = completeness_score(&organelles, &metrics, sample_size, xy_nm, z_nm, public_status);
+        let c_score = completeness_score(
+            &organelles,
+            &metrics,
+            sample_size,
+            xy_nm,
+            z_nm,
+            public_status,
+        );
 
         let mut note_parts = Vec::new();
         if public_status == "complete" {
@@ -2136,15 +3308,31 @@ fn seed_database(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>
         } else if public_status == "partial" {
             note_parts.push("Some public data available.".to_string());
         }
-        let sample_size_notes = row.get("sample_size_notes").cloned().unwrap_or_default().trim().to_string();
+        let sample_size_notes = row
+            .get("sample_size_notes")
+            .cloned()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if !sample_size_notes.is_empty() && sample_size_notes.len() <= 120 {
             note_parts.push(sample_size_notes);
         }
-        let notes = if note_parts.is_empty() { None } else { Some(note_parts.join(" ")) };
+        let notes = if note_parts.is_empty() {
+            None
+        } else {
+            Some(note_parts.join(" "))
+        };
 
-        let included_status = row.get("included_status").cloned().unwrap_or_else(|| "included".to_string());
+        let included_status = row
+            .get("included_status")
+            .cloned()
+            .unwrap_or_else(|| "included".to_string());
         let pmid = study.get("pmid").cloned().unwrap_or_default();
-        let publication_pmid = if pmid.trim().is_empty() { None } else { Some(pmid.trim().to_string()) };
+        let publication_pmid = if pmid.trim().is_empty() {
+            None
+        } else {
+            Some(pmid.trim().to_string())
+        };
         let study_slug = row.get("study_slug").cloned().unwrap_or_default();
         let source_publication_url = Some(publication_url(&pmid, &study_slug));
 
@@ -2155,10 +3343,23 @@ fn seed_database(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>
             .filter(|s| !s.is_empty())
             .collect();
 
-        let title = format!("{} whole-cell dataset ({})", cell_type, row.get("imaging_modality").cloned().unwrap_or_default());
+        let title = format!(
+            "{} whole-cell dataset ({})",
+            cell_type,
+            row.get("imaging_modality").cloned().unwrap_or_default()
+        );
         let paper_title = study.get("title").cloned().unwrap_or_default();
-        let year = row.get("year").and_then(|y| y.parse::<i64>().ok()).unwrap_or(0);
-        let source = if !row.get("journal_published").cloned().unwrap_or_default().trim().is_empty() {
+        let year = row
+            .get("year")
+            .and_then(|y| y.parse::<i64>().ok())
+            .unwrap_or(0);
+        let source = if !row
+            .get("journal_published")
+            .cloned()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             row.get("journal_published").cloned().unwrap_or_default()
         } else {
             study_id.clone()
@@ -2234,7 +3435,8 @@ fn query_records(
         whole_cell_boundary_confirmed, notes, included_status, 
         source_study_id, publication_pmid, source_publication_url, 
         public_locator_urls
-    FROM dataset_records WHERE 1=1".to_string();
+    FROM dataset_records WHERE 1=1"
+        .to_string();
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -2247,7 +3449,8 @@ fn query_records(
 
     if let Some(ref q) = filters.query {
         if !q.trim().is_empty() {
-            sql.push_str(" AND (
+            sql.push_str(
+                " AND (
                 title LIKE ? OR 
                 paper_title LIKE ? OR 
                 source_study_id LIKE ? OR 
@@ -2256,7 +3459,8 @@ fn query_records(
                 species LIKE ? OR 
                 cell_type LIKE ? OR 
                 notes LIKE ?
-            )");
+            )",
+            );
             let pattern = format!("%{}%", q);
             for _ in 0..8 {
                 params.push(Box::new(pattern.clone()));
@@ -2278,7 +3482,9 @@ fn query_records(
 
     if let Some(ref org) = filters.organelle {
         if !org.trim().is_empty() {
-            sql.push_str(" AND EXISTS (SELECT 1 FROM json_each(organelles) WHERE LOWER(value) = LOWER(?))");
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM json_each(organelles) WHERE LOWER(value) = LOWER(?))",
+            );
             params.push(Box::new(org.clone()));
         }
     }
@@ -2345,9 +3551,12 @@ fn query_records(
         let public_locator_urls_str: String = row.get(29)?;
 
         let organelles: Vec<String> = serde_json::from_str(&organelles_str).unwrap_or_default();
-        let organelle_pairs: Vec<String> = serde_json::from_str(&organelle_pairs_str).unwrap_or_default();
-        let metric_families: Vec<String> = serde_json::from_str(&metric_families_str).unwrap_or_default();
-        let public_locator_urls: Vec<String> = serde_json::from_str(&public_locator_urls_str).unwrap_or_default();
+        let organelle_pairs: Vec<String> =
+            serde_json::from_str(&organelle_pairs_str).unwrap_or_default();
+        let metric_families: Vec<String> =
+            serde_json::from_str(&metric_families_str).unwrap_or_default();
+        let public_locator_urls: Vec<String> =
+            serde_json::from_str(&public_locator_urls_str).unwrap_or_default();
 
         Ok(DatasetRecord {
             dataset_id: row.get(0)?,
@@ -2449,7 +3658,8 @@ async fn handle_search(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2459,7 +3669,9 @@ struct ExportParams {
     #[serde(flatten)]
     filters: DatasetFilters,
 }
-fn default_export_format() -> String { "csv".to_string() }
+fn default_export_format() -> String {
+    "csv".to_string()
+}
 
 async fn handle_export(
     State(state): State<AppState>,
@@ -2476,7 +3688,8 @@ async fn handle_export(
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             serde_json::to_string(&records).unwrap(),
-        ).into_response();
+        )
+            .into_response();
     }
 
     if params.format == "bibtex" {
@@ -2485,29 +3698,48 @@ async fn handle_export(
             let slug = d.dataset_id.replace('-', "");
             bib.push_str(&format!("@article{{{}, \n", slug));
             bib.push_str(&format!("  title = {{{}}},\n", d.paper_title));
-            let author = d.source_study_id.as_deref().unwrap_or(&d.source)
+            let author = d
+                .source_study_id
+                .as_deref()
+                .unwrap_or(&d.source)
                 .replace("et al.", "")
                 .replace("et al", "")
                 .trim()
-                .split_whitespace().next().unwrap_or("")
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
                 .to_string();
-            bib.push_str(&format!("  author = {{{}}},\n", if author.is_empty() { &d.source } else { &author }));
+            bib.push_str(&format!(
+                "  author = {{{}}},\n",
+                if author.is_empty() {
+                    &d.source
+                } else {
+                    &author
+                }
+            ));
             bib.push_str(&format!("  journal = {{{}}},\n", d.source));
             bib.push_str(&format!("  year = {{{}}},\n", d.year));
             if let Some(ref pmid) = d.publication_pmid {
                 bib.push_str(&format!("  pmid = {{{}}},\n", pmid));
             }
-            bib.push_str(&format!("  note = {{Indexed in the Cell Anatomy Corpus: {}}}\n", d.title));
+            bib.push_str(&format!(
+                "  note = {{Indexed in the Cell Anatomy Corpus: {}}}\n",
+                d.title
+            ));
             bib.push_str("}\n\n");
         }
         return (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, "text/plain"),
-                (header::CONTENT_DISPOSITION, "attachment; filename=cell_anatomy_corpus_export.bib"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=cell_anatomy_corpus_export.bib",
+                ),
             ],
             bib,
-        ).into_response();
+        )
+            .into_response();
     }
 
     let mut writer = csv::Writer::from_writer(Vec::new());
@@ -2534,8 +3766,14 @@ async fn handle_export(
     ]);
 
     for d in &records {
-        let xy_str = d.lateral_resolution_nm.map(|x| x.to_string()).unwrap_or_default();
-        let z_str = d.axial_resolution_nm.map(|z| z.to_string()).unwrap_or_default();
+        let xy_str = d
+            .lateral_resolution_nm
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        let z_str = d
+            .axial_resolution_nm
+            .map(|z| z.to_string())
+            .unwrap_or_default();
         let _ = writer.write_record([
             &d.dataset_id,
             &d.title,
@@ -2566,15 +3804,26 @@ async fn handle_export(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/csv"),
-            (header::CONTENT_DISPOSITION, "attachment; filename=cell_anatomy_corpus_export.csv"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=cell_anatomy_corpus_export.csv",
+            ),
         ],
         csv_string,
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_facets(State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let records = match query_records(&conn, &DatasetFilters { include_borderline: Some(false), ..Default::default() }, false) {
+    let records = match query_records(
+        &conn,
+        &DatasetFilters {
+            include_borderline: Some(false),
+            ..Default::default()
+        },
+        false,
+    ) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -2602,13 +3851,19 @@ async fn handle_facets(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     let sort_and_format = |map: std::collections::HashMap<String, i32>| {
-        let mut v: Vec<serde_json::Value> = map.into_iter()
+        let mut v: Vec<serde_json::Value> = map
+            .into_iter()
             .map(|(k, count)| serde_json::json!({ "value": k, "count": count }))
             .collect();
         v.sort_by(|a, b| {
             let ac = a["count"].as_i64().unwrap_or(0);
             let bc = b["count"].as_i64().unwrap_or(0);
-            bc.cmp(&ac).then_with(|| a["value"].as_str().unwrap_or("").cmp(&b["value"].as_str().unwrap_or("")))
+            bc.cmp(&ac).then_with(|| {
+                a["value"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(&b["value"].as_str().unwrap_or(""))
+            })
         });
         v
     };
@@ -2625,7 +3880,8 @@ async fn handle_facets(State(state): State<AppState>) -> impl IntoResponse {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2641,11 +3897,18 @@ fn get_field_value(record: &DatasetRecord, field: &str) -> String {
         "modality_family" => record.modality_family.clone(),
         "modality" => record.modality.clone(),
         "species" => record.species.clone(),
-        "comparator_class" => record.comparator_class.clone().unwrap_or("none".to_string()),
+        "comparator_class" => record
+            .comparator_class
+            .clone()
+            .unwrap_or("none".to_string()),
         "sample_size_bucket" => record.sample_size_bucket.clone(),
         _ => "none".to_string(),
     };
-    if val.trim().is_empty() { "none".to_string() } else { val }
+    if val.trim().is_empty() {
+        "none".to_string()
+    } else {
+        val
+    }
 }
 
 async fn handle_cross_tab(
@@ -2653,7 +3916,14 @@ async fn handle_cross_tab(
     Query(params): Query<CrossTabParams>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let records = match query_records(&conn, &DatasetFilters { include_borderline: Some(true), ..Default::default() }, false) {
+    let records = match query_records(
+        &conn,
+        &DatasetFilters {
+            include_borderline: Some(true),
+            ..Default::default()
+        },
+        false,
+    ) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -2697,7 +3967,8 @@ async fn handle_cross_tab(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_frontier(
@@ -2710,22 +3981,26 @@ async fn handle_frontier(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let frontier: Vec<serde_json::Value> = records.into_iter()
+    let frontier: Vec<serde_json::Value> = records
+        .into_iter()
         .filter(|r| r.lateral_resolution_nm.is_some() && r.sample_size.is_some())
-        .map(|r| serde_json::json!({
-            "id": r.dataset_id,
-            "title": r.title,
-            "res": r.lateral_resolution_nm,
-            "ss": r.sample_size,
-            "modality": r.modality_family,
-        }))
+        .map(|r| {
+            serde_json::json!({
+                "id": r.dataset_id,
+                "title": r.title,
+                "res": r.lateral_resolution_nm,
+                "ss": r.sample_size,
+                "modality": r.modality_family,
+            })
+        })
         .collect();
 
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&frontier).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_toolkit(
@@ -2746,9 +4021,15 @@ async fn handle_toolkit(
         modalities_found.insert(r.modality_family.clone());
         for o in r.organelles {
             organelles_found.insert(o.clone());
-            let organelle_entry = matrix.entry(o.clone()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let organelle_entry = matrix
+                .entry(o.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             if let serde_json::Value::Object(ref mut m) = organelle_entry {
-                let count = m.get(&r.modality_family).and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+                let count = m
+                    .get(&r.modality_family)
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    + 1;
                 m.insert(r.modality_family.clone(), serde_json::json!(count));
             }
         }
@@ -2769,7 +4050,8 @@ async fn handle_toolkit(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_measurement_grammar(
@@ -2789,7 +4071,9 @@ async fn handle_measurement_grammar(
     for r in records {
         for o in &r.organelles {
             *organelle_totals.entry(o.clone()).or_insert(0) += 1;
-            let organelle_entry = matrix.entry(o.clone()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let organelle_entry = matrix
+                .entry(o.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             if let serde_json::Value::Object(ref mut m) = organelle_entry {
                 for met in &r.metric_families {
                     *metric_totals.entry(met.clone()).or_insert(0) += 1;
@@ -2801,7 +4085,8 @@ async fn handle_measurement_grammar(
     }
 
     let mut organelles: Vec<String> = organelle_totals.keys().cloned().collect();
-    let organelle_diversity: std::collections::HashMap<String, usize> = matrix.iter()
+    let organelle_diversity: std::collections::HashMap<String, usize> = matrix
+        .iter()
         .map(|(k, v)| (k.clone(), v.as_object().unwrap().len()))
         .collect();
 
@@ -2810,7 +4095,10 @@ async fn handle_measurement_grammar(
         let div_b = organelle_diversity.get(b).cloned().unwrap_or(0);
         let tot_a = organelle_totals.get(a).cloned().unwrap_or(0);
         let tot_b = organelle_totals.get(b).cloned().unwrap_or(0);
-        div_b.cmp(&div_a).then_with(|| tot_b.cmp(&tot_a)).then_with(|| a.cmp(b))
+        div_b
+            .cmp(&div_a)
+            .then_with(|| tot_b.cmp(&tot_a))
+            .then_with(|| a.cmp(b))
     });
 
     let mut metric_families: Vec<String> = metric_totals.keys().cloned().collect();
@@ -2833,7 +4121,8 @@ async fn handle_measurement_grammar(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_reusability_map(
@@ -2870,10 +4159,14 @@ async fn handle_reusability_map(
 
             if r.public_data_status != "none" {
                 *reusable_totals.entry(o.clone()).or_insert(0) += 1;
-                reusable_modalities.entry(o.clone()).or_insert_with(std::collections::HashSet::new)
+                reusable_modalities
+                    .entry(o.clone())
+                    .or_insert_with(std::collections::HashSet::new)
                     .insert(r.modality_family.clone());
                 for met in &r.metric_families {
-                    reusable_metrics.entry(o.clone()).or_insert_with(std::collections::HashSet::new)
+                    reusable_metrics
+                        .entry(o.clone())
+                        .or_insert_with(std::collections::HashSet::new)
                         .insert(met.clone());
                 }
             }
@@ -2883,7 +4176,11 @@ async fn handle_reusability_map(
     let mut public_share = serde_json::Map::new();
     for (o, total) in &row_totals {
         let reusable = reusable_totals.get(o).cloned().unwrap_or(0);
-        let share = if *total > 0 { (reusable as f64 / *total as f64 * 1000.0).round() / 1000.0 } else { 0.0 };
+        let share = if *total > 0 {
+            (reusable as f64 / *total as f64 * 1000.0).round() / 1000.0
+        } else {
+            0.0
+        };
         public_share.insert(o.clone(), serde_json::json!(share));
     }
 
@@ -2901,15 +4198,18 @@ async fn handle_reusability_map(
             .then_with(|| a.cmp(b))
     });
 
-    let reusable_modality_families: serde_json::Map<String, serde_json::Value> = reusable_modalities.into_iter()
-        .map(|(k, set)| {
-            let mut v: Vec<String> = set.into_iter().collect();
-            v.sort();
-            (k, serde_json::json!(v))
-        })
-        .collect();
+    let reusable_modality_families: serde_json::Map<String, serde_json::Value> =
+        reusable_modalities
+            .into_iter()
+            .map(|(k, set)| {
+                let mut v: Vec<String> = set.into_iter().collect();
+                v.sort();
+                (k, serde_json::json!(v))
+            })
+            .collect();
 
-    let reusable_metric_families: serde_json::Map<String, serde_json::Value> = reusable_metrics.into_iter()
+    let reusable_metric_families: serde_json::Map<String, serde_json::Value> = reusable_metrics
+        .into_iter()
         .map(|(k, set)| {
             let mut v: Vec<String> = set.into_iter().collect();
             v.sort();
@@ -2932,7 +4232,8 @@ async fn handle_reusability_map(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_coverage_atlas(
@@ -2952,10 +4253,14 @@ async fn handle_coverage_atlas(
 
     for r in records {
         *cell_type_totals.entry(r.cell_type.clone()).or_insert(0) += 1;
-        cell_type_species.entry(r.cell_type.clone()).or_insert_with(std::collections::HashSet::new)
+        cell_type_species
+            .entry(r.cell_type.clone())
+            .or_insert_with(std::collections::HashSet::new)
             .insert(r.species.clone());
 
-        let ct_entry = matrix.entry(r.cell_type.clone()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let ct_entry = matrix
+            .entry(r.cell_type.clone())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         if let serde_json::Value::Object(ref mut m) = ct_entry {
             for o in &r.organelles {
                 *organelle_totals.entry(o.clone()).or_insert(0) += 1;
@@ -2965,7 +4270,8 @@ async fn handle_coverage_atlas(
         }
     }
 
-    let cell_type_organelle_counts: std::collections::HashMap<String, usize> = matrix.iter()
+    let cell_type_organelle_counts: std::collections::HashMap<String, usize> = matrix
+        .iter()
         .map(|(k, v)| (k.clone(), v.as_object().unwrap().len()))
         .collect();
 
@@ -2975,7 +4281,10 @@ async fn handle_coverage_atlas(
         let div_b = cell_type_organelle_counts.get(b).cloned().unwrap_or(0);
         let tot_a = cell_type_totals.get(a).cloned().unwrap_or(0);
         let tot_b = cell_type_totals.get(b).cloned().unwrap_or(0);
-        div_b.cmp(&div_a).then_with(|| tot_b.cmp(&tot_a)).then_with(|| a.cmp(b))
+        div_b
+            .cmp(&div_a)
+            .then_with(|| tot_b.cmp(&tot_a))
+            .then_with(|| a.cmp(b))
     });
 
     let mut organelles: Vec<String> = organelle_totals.keys().cloned().collect();
@@ -2985,7 +4294,8 @@ async fn handle_coverage_atlas(
         tot_b.cmp(&tot_a).then_with(|| a.cmp(b))
     });
 
-    let cell_type_species_formatted: serde_json::Map<String, serde_json::Value> = cell_type_species.into_iter()
+    let cell_type_species_formatted: serde_json::Map<String, serde_json::Value> = cell_type_species
+        .into_iter()
         .map(|(k, set)| {
             let mut v: Vec<String> = set.into_iter().collect();
             v.sort();
@@ -3007,7 +4317,8 @@ async fn handle_coverage_atlas(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_timeline(
@@ -3030,20 +4341,32 @@ async fn handle_timeline(
     for r in records {
         let yr = r.year;
         *year_totals.entry(yr).or_insert(0) += 1;
-        *modality_totals.entry(r.modality_family.clone()).or_insert(0) += 1;
+        *modality_totals
+            .entry(r.modality_family.clone())
+            .or_insert(0) += 1;
 
         if r.public_data_status != "none" {
             *public_counts.entry(yr).or_insert(0) += 1;
         }
 
-        organelles_by_year.entry(yr).or_insert_with(std::collections::HashSet::new)
+        organelles_by_year
+            .entry(yr)
+            .or_insert_with(std::collections::HashSet::new)
             .extend(r.organelles);
-        metrics_by_year.entry(yr).or_insert_with(std::collections::HashSet::new)
+        metrics_by_year
+            .entry(yr)
+            .or_insert_with(std::collections::HashSet::new)
             .extend(r.metric_families);
 
-        let yr_entry = matrix.entry(yr.to_string()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let yr_entry = matrix
+            .entry(yr.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         if let serde_json::Value::Object(ref mut m) = yr_entry {
-            let count = m.get(&r.modality_family).and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+            let count = m
+                .get(&r.modality_family)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                + 1;
             m.insert(r.modality_family.clone(), serde_json::json!(count));
         }
     }
@@ -3065,10 +4388,22 @@ async fn handle_timeline(
 
     for yr in &years {
         let yr_str = yr.to_string();
-        year_totals_formatted.insert(yr_str.clone(), serde_json::json!(year_totals.get(yr).cloned().unwrap_or(0)));
-        public_counts_formatted.insert(yr_str.clone(), serde_json::json!(public_counts.get(yr).cloned().unwrap_or(0)));
-        organelle_counts_formatted.insert(yr_str.clone(), serde_json::json!(organelles_by_year.get(yr).map(|s| s.len()).unwrap_or(0)));
-        metric_family_counts_formatted.insert(yr_str.clone(), serde_json::json!(metrics_by_year.get(yr).map(|s| s.len()).unwrap_or(0)));
+        year_totals_formatted.insert(
+            yr_str.clone(),
+            serde_json::json!(year_totals.get(yr).cloned().unwrap_or(0)),
+        );
+        public_counts_formatted.insert(
+            yr_str.clone(),
+            serde_json::json!(public_counts.get(yr).cloned().unwrap_or(0)),
+        );
+        organelle_counts_formatted.insert(
+            yr_str.clone(),
+            serde_json::json!(organelles_by_year.get(yr).map(|s| s.len()).unwrap_or(0)),
+        );
+        metric_family_counts_formatted.insert(
+            yr_str.clone(),
+            serde_json::json!(metrics_by_year.get(yr).map(|s| s.len()).unwrap_or(0)),
+        );
     }
 
     let response = serde_json::json!({
@@ -3085,7 +4420,8 @@ async fn handle_timeline(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 fn build_stats(mut values: Vec<f64>) -> Option<serde_json::Value> {
@@ -3106,7 +4442,14 @@ fn build_stats(mut values: Vec<f64>) -> Option<serde_json::Value> {
 
 async fn handle_benchmarks(State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let records = match query_records(&conn, &DatasetFilters { include_borderline: Some(true), ..Default::default() }, false) {
+    let records = match query_records(
+        &conn,
+        &DatasetFilters {
+            include_borderline: Some(true),
+            ..Default::default()
+        },
+        false,
+    ) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -3119,11 +4462,13 @@ async fn handle_benchmarks(State(state): State<AppState>) -> impl IntoResponse {
 
     let mut grouped = std::collections::HashMap::new();
     for r in records {
-        let entry = grouped.entry(r.modality_family.clone()).or_insert_with(|| GroupData {
-            resolutions: Vec::new(),
-            sample_sizes: Vec::new(),
-            count: 0,
-        });
+        let entry = grouped
+            .entry(r.modality_family.clone())
+            .or_insert_with(|| GroupData {
+                resolutions: Vec::new(),
+                sample_sizes: Vec::new(),
+                count: 0,
+            });
         entry.count += 1;
         if let Some(res) = r.lateral_resolution_nm {
             entry.resolutions.push(res);
@@ -3142,13 +4487,19 @@ async fn handle_benchmarks(State(state): State<AppState>) -> impl IntoResponse {
             "sample_size_stats": build_stats(data.sample_sizes),
         }));
     }
-    results.sort_by(|a, b| a["modality_family"].as_str().unwrap().cmp(b["modality_family"].as_str().unwrap()));
+    results.sort_by(|a, b| {
+        a["modality_family"]
+            .as_str()
+            .unwrap()
+            .cmp(b["modality_family"].as_str().unwrap())
+    });
 
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&results).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -3170,7 +4521,8 @@ async fn handle_plan(
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
 
-    let target_organelles: Vec<String> = params.organelles
+    let target_organelles: Vec<String> = params
+        .organelles
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -3194,7 +4546,8 @@ async fn handle_plan(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let bio_matches: Vec<DatasetRecord> = datasets.iter()
+    let bio_matches: Vec<DatasetRecord> = datasets
+        .iter()
         .filter(|d| target_organelles.iter().any(|o| d.organelles.contains(o)))
         .cloned()
         .collect();
@@ -3217,20 +4570,30 @@ async fn handle_plan(
     }
 
     let (status, msg) = if bio_matches.is_empty() {
-        ("frontier", "No records in the current corpus capture this organelle target.".to_string())
+        (
+            "frontier",
+            "No records in the current corpus capture this organelle target.".to_string(),
+        )
     } else if strict_matches.is_empty() {
         ("high-risk", format!("{} matching records exist in the current corpus, but none meet the active threshold filters.", bio_matches.len()))
     } else if strict_matches.len() < 3 {
         ("challenging", format!("Only {} records in the current corpus meet the active threshold filters for this target.", strict_matches.len()))
     } else {
-        ("feasible", format!("{} records in the current corpus meet the active filters for this target.", strict_matches.len()))
+        (
+            "feasible",
+            format!(
+                "{} records in the current corpus meet the active filters for this target.",
+                strict_matches.len()
+            ),
+        )
     };
 
     let mut modality_counts = std::collections::HashMap::new();
     for d in &bio_matches {
         *modality_counts.entry(d.modality.clone()).or_insert(0) += 1;
     }
-    let top_modality = modality_counts.into_iter()
+    let top_modality = modality_counts
+        .into_iter()
         .max_by_key(|&(_, count)| count)
         .map(|(m, _)| m)
         .unwrap_or_else(|| "Unknown".to_string());
@@ -3249,13 +4612,18 @@ async fn handle_plan(
     });
     let standard_metrics: Vec<String> = sorted_metrics.into_iter().take(3).collect();
 
-    let suggested_baselines: Vec<DatasetRecord> = bio_matches.iter()
+    let suggested_baselines: Vec<DatasetRecord> = bio_matches
+        .iter()
         .filter(|d| d.public_data_status != "none")
         .take(3)
         .cloned()
         .collect();
 
-    let precedents = if !strict_matches.is_empty() { strict_matches.clone() } else { bio_matches.clone() };
+    let precedents = if !strict_matches.is_empty() {
+        strict_matches.clone()
+    } else {
+        bio_matches.clone()
+    };
 
     let response = serde_json::json!({
         "biological_target": target_organelles.join(" & "),
@@ -3275,7 +4643,8 @@ async fn handle_plan(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -3293,7 +4662,9 @@ async fn handle_plan_export(
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
 
-    let target_organelles: Vec<String> = params.plan_params.organelles
+    let target_organelles: Vec<String> = params
+        .plan_params
+        .organelles
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -3317,7 +4688,8 @@ async fn handle_plan_export(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let bio_matches: Vec<DatasetRecord> = datasets.iter()
+    let bio_matches: Vec<DatasetRecord> = datasets
+        .iter()
         .filter(|d| target_organelles.iter().any(|o| d.organelles.contains(o)))
         .cloned()
         .collect();
@@ -3339,15 +4711,21 @@ async fn handle_plan_export(
         }
     }
 
-    let precedents = if !strict_matches.is_empty() { strict_matches } else { bio_matches };
+    let precedents = if !strict_matches.is_empty() {
+        strict_matches
+    } else {
+        bio_matches
+    };
 
     let mut filtered_precedents = precedents;
     if let Some(ref pq) = params.precedent_query {
         let query_lower = pq.trim().to_lowercase();
         if !query_lower.is_empty() {
-            filtered_precedents = filtered_precedents.into_iter()
+            filtered_precedents = filtered_precedents
+                .into_iter()
                 .filter(|d| {
-                    let haystack = format!("{} {} {} {} {} {} {} {} {} {}",
+                    let haystack = format!(
+                        "{} {} {} {} {} {} {} {} {} {}",
                         d.dataset_id,
                         d.source_study_id.as_deref().unwrap_or(""),
                         d.publication_pmid.as_deref().unwrap_or(""),
@@ -3358,7 +4736,8 @@ async fn handle_plan_export(
                         d.modality,
                         d.comparator_class.as_deref().unwrap_or(""),
                         d.comparator_detail.as_deref().unwrap_or(""),
-                    ).to_lowercase();
+                    )
+                    .to_lowercase();
                     haystack.contains(&query_lower)
                 })
                 .collect();
@@ -3367,40 +4746,72 @@ async fn handle_plan_export(
 
     if let Some(ref pub_state) = params.precedent_public {
         if !pub_state.trim().is_empty() {
-            filtered_precedents = filtered_precedents.into_iter()
+            filtered_precedents = filtered_precedents
+                .into_iter()
                 .filter(|d| d.public_data_status == *pub_state)
                 .collect();
         }
     }
 
-    let sort_key = params.precedent_sort.unwrap_or_else(|| "year_desc".to_string());
-    filtered_precedents.sort_by(|a, b| {
-        match sort_key.as_str() {
-            "year_asc" => a.year.cmp(&b.year).then_with(|| a.dataset_id.cmp(&b.dataset_id)),
-            "author_asc" => {
-                let auth_a = a.source_study_id.as_deref().unwrap_or(&a.dataset_id).to_lowercase();
-                let auth_b = b.source_study_id.as_deref().unwrap_or(&b.dataset_id).to_lowercase();
-                auth_a.cmp(&auth_b).then_with(|| b.year.cmp(&a.year)).then_with(|| a.dataset_id.cmp(&b.dataset_id))
-            }
-            "sample_desc" => {
-                let ss_a = a.sample_size.unwrap_or(-1);
-                let ss_b = b.sample_size.unwrap_or(-1);
-                ss_b.cmp(&ss_a).then_with(|| b.year.cmp(&a.year)).then_with(|| a.dataset_id.cmp(&b.dataset_id))
-            }
-            "res_asc" => {
-                let res_a = a.lateral_resolution_nm.unwrap_or(f64::INFINITY);
-                let res_b = b.lateral_resolution_nm.unwrap_or(f64::INFINITY);
-                res_a.partial_cmp(&res_b).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.year.cmp(&a.year))
-                    .then_with(|| a.dataset_id.cmp(&b.dataset_id))
-            }
-            "public_first" => {
-                let r_a = match a.public_data_status.as_str() { "complete" => 2, "partial" => 1, _ => 0 };
-                let r_b = match b.public_data_status.as_str() { "complete" => 2, "partial" => 1, _ => 0 };
-                r_b.cmp(&r_a).then_with(|| b.year.cmp(&a.year)).then_with(|| a.dataset_id.cmp(&b.dataset_id))
-            }
-            _ => b.year.cmp(&a.year).then_with(|| a.dataset_id.cmp(&b.dataset_id)),
+    let sort_key = params
+        .precedent_sort
+        .unwrap_or_else(|| "year_desc".to_string());
+    filtered_precedents.sort_by(|a, b| match sort_key.as_str() {
+        "year_asc" => a
+            .year
+            .cmp(&b.year)
+            .then_with(|| a.dataset_id.cmp(&b.dataset_id)),
+        "author_asc" => {
+            let auth_a = a
+                .source_study_id
+                .as_deref()
+                .unwrap_or(&a.dataset_id)
+                .to_lowercase();
+            let auth_b = b
+                .source_study_id
+                .as_deref()
+                .unwrap_or(&b.dataset_id)
+                .to_lowercase();
+            auth_a
+                .cmp(&auth_b)
+                .then_with(|| b.year.cmp(&a.year))
+                .then_with(|| a.dataset_id.cmp(&b.dataset_id))
         }
+        "sample_desc" => {
+            let ss_a = a.sample_size.unwrap_or(-1);
+            let ss_b = b.sample_size.unwrap_or(-1);
+            ss_b.cmp(&ss_a)
+                .then_with(|| b.year.cmp(&a.year))
+                .then_with(|| a.dataset_id.cmp(&b.dataset_id))
+        }
+        "res_asc" => {
+            let res_a = a.lateral_resolution_nm.unwrap_or(f64::INFINITY);
+            let res_b = b.lateral_resolution_nm.unwrap_or(f64::INFINITY);
+            res_a
+                .partial_cmp(&res_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.year.cmp(&a.year))
+                .then_with(|| a.dataset_id.cmp(&b.dataset_id))
+        }
+        "public_first" => {
+            let r_a = match a.public_data_status.as_str() {
+                "complete" => 2,
+                "partial" => 1,
+                _ => 0,
+            };
+            let r_b = match b.public_data_status.as_str() {
+                "complete" => 2,
+                "partial" => 1,
+                _ => 0,
+            };
+            r_b.cmp(&r_a)
+                .then_with(|| b.year.cmp(&a.year))
+                .then_with(|| a.dataset_id.cmp(&b.dataset_id))
+        }
+        _ => b
+            .year
+            .cmp(&a.year)
+            .then_with(|| a.dataset_id.cmp(&b.dataset_id)),
     });
 
     let mut writer = csv::Writer::from_writer(Vec::new());
@@ -3427,8 +4838,14 @@ async fn handle_plan_export(
     ]);
 
     for d in &filtered_precedents {
-        let xy_str = d.lateral_resolution_nm.map(|x| x.to_string()).unwrap_or_default();
-        let z_str = d.axial_resolution_nm.map(|z| z.to_string()).unwrap_or_default();
+        let xy_str = d
+            .lateral_resolution_nm
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        let z_str = d
+            .axial_resolution_nm
+            .map(|z| z.to_string())
+            .unwrap_or_default();
         let ss_str = d.sample_size.map(|s| s.to_string()).unwrap_or_default();
         let _ = writer.write_record([
             &d.dataset_id,
@@ -3460,10 +4877,14 @@ async fn handle_plan_export(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/csv"),
-            (header::CONTENT_DISPOSITION, "attachment; filename=cell_anatomy_plan_precedents.csv"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=cell_anatomy_plan_precedents.csv",
+            ),
         ],
         csv_string,
-    ).into_response()
+    )
+        .into_response()
 }
 
 async fn handle_get_dataset(
@@ -3471,7 +4892,10 @@ async fn handle_get_dataset(
     axum::extract::Path(dataset_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let filters = DatasetFilters { include_borderline: Some(true), ..Default::default() };
+    let filters = DatasetFilters {
+        include_borderline: Some(true),
+        ..Default::default()
+    };
     let records = match query_records(&conn, &filters, false) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -3482,7 +4906,8 @@ async fn handle_get_dataset(
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             serde_json::to_string(&dataset).unwrap(),
-        ).into_response();
+        )
+            .into_response();
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -3516,7 +4941,10 @@ async fn handle_get_similar(
     axum::extract::Path(dataset_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let filters = DatasetFilters { include_borderline: Some(true), ..Default::default() };
+    let filters = DatasetFilters {
+        include_borderline: Some(true),
+        ..Default::default()
+    };
     let records = match query_records(&conn, &filters, false) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -3527,7 +4955,8 @@ async fn handle_get_similar(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let mut scored: Vec<(DatasetRecord, i32)> = records.into_iter()
+    let mut scored: Vec<(DatasetRecord, i32)> = records
+        .into_iter()
         .filter(|r| r.dataset_id != dataset_id)
         .map(|r| {
             let score = similarity_score(&r, &target);
@@ -3546,7 +4975,8 @@ async fn handle_get_similar(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&result).unwrap(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -3559,7 +4989,10 @@ async fn handle_compare(
     axum::extract::Json(payload): axum::extract::Json<CompareRequest>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    let filters = DatasetFilters { include_borderline: Some(true), ..Default::default() };
+    let filters = DatasetFilters {
+        include_borderline: Some(true),
+        ..Default::default()
+    };
     let records = match query_records(&conn, &filters, false) {
         Ok(r) => r,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -3600,13 +5033,21 @@ async fn handle_compare(
         v
     };
 
-    let cell_types_groups: Vec<Vec<String>> = selected.iter().map(|d| vec![d.cell_type.clone()]).collect();
-    let species_groups: Vec<Vec<String>> = selected.iter().map(|d| vec![d.species.clone()]).collect();
+    let cell_types_groups: Vec<Vec<String>> =
+        selected.iter().map(|d| vec![d.cell_type.clone()]).collect();
+    let species_groups: Vec<Vec<String>> =
+        selected.iter().map(|d| vec![d.species.clone()]).collect();
     let organelles_groups: Vec<&Vec<String>> = selected.iter().map(|d| &d.organelles).collect();
     let pairs_groups: Vec<&Vec<String>> = selected.iter().map(|d| &d.organelle_pairs).collect();
     let metrics_groups: Vec<&Vec<String>> = selected.iter().map(|d| &d.metric_families).collect();
-    let comparators_groups: Vec<Vec<String>> = selected.iter().filter_map(|d| d.comparator_class.clone().map(|c| vec![c])).collect();
-    let modality_family_groups: Vec<Vec<String>> = selected.iter().map(|d| vec![d.modality_family.clone()]).collect();
+    let comparators_groups: Vec<Vec<String>> = selected
+        .iter()
+        .filter_map(|d| d.comparator_class.clone().map(|c| vec![c]))
+        .collect();
+    let modality_family_groups: Vec<Vec<String>> = selected
+        .iter()
+        .map(|d| vec![d.modality_family.clone()])
+        .collect();
 
     let shared_fields = serde_json::json!({
         "cell_types": intersect(cell_types_groups.iter().collect()),
@@ -3626,11 +5067,25 @@ async fn handle_compare(
     });
 
     let mut score = 0;
-    let all_same_cell_type = selected.iter().map(|d| &d.cell_type).collect::<std::collections::HashSet<_>>().len() == 1;
-    if all_same_cell_type { score += 25; }
+    let all_same_cell_type = selected
+        .iter()
+        .map(|d| &d.cell_type)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == 1;
+    if all_same_cell_type {
+        score += 25;
+    }
 
-    let all_same_species = selected.iter().map(|d| &d.species).collect::<std::collections::HashSet<_>>().len() == 1;
-    if all_same_species { score += 10; }
+    let all_same_species = selected
+        .iter()
+        .map(|d| &d.species)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == 1;
+    if all_same_species {
+        score += 10;
+    }
 
     let shared_pairs = shared_fields["organelle_pairs"].as_array().unwrap();
     if !shared_pairs.is_empty() {
@@ -3642,14 +5097,27 @@ async fn handle_compare(
         score += std::cmp::min(15, 3 * shared_metrics.len() as i64);
     }
 
-    let all_same_mod_fam = selected.iter().map(|d| &d.modality_family).collect::<std::collections::HashSet<_>>().len() == 1;
-    if all_same_mod_fam { score += 10; }
+    let all_same_mod_fam = selected
+        .iter()
+        .map(|d| &d.modality_family)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == 1;
+    if all_same_mod_fam {
+        score += 10;
+    }
 
     let shared_comparators = shared_fields["comparator_classes"].as_array().unwrap();
-    if !shared_comparators.is_empty() { score += 10; }
+    if !shared_comparators.is_empty() {
+        score += 10;
+    }
 
-    let all_completeness_high = selected.iter().all(|d| d.metadata_completeness_score >= 0.8);
-    if all_completeness_high { score += 10; }
+    let all_completeness_high = selected
+        .iter()
+        .all(|d| d.metadata_completeness_score >= 0.8);
+    if all_completeness_high {
+        score += 10;
+    }
 
     score = std::cmp::min(score, 100);
 
@@ -3673,7 +5141,224 @@ async fn handle_compare(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string(&response).unwrap(),
-    ).into_response()
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture_queue() -> Value {
+        json!({
+            "root": "/tmp/scion-public-data",
+            "root_exists": true,
+            "datasets": [
+                {
+                    "slug": "alpha",
+                    "dataset": { "title": "Alpha cells" },
+                    "assets": [
+                        {
+                            "relative_path": "a1.tif",
+                            "format": "TIFF",
+                            "size_bytes": 100,
+                            "dimensions": { "z": 3, "y": 4, "x": 5 },
+                            "index_status": "ready_for_conversion",
+                            "convert_command": "convert alpha a1"
+                        },
+                        {
+                            "relative_path": "a2.tif",
+                            "format": "TIFF",
+                            "index_status": "ready_for_conversion",
+                            "convert_command": "convert alpha a2"
+                        }
+                    ]
+                },
+                {
+                    "slug": "beta",
+                    "dataset": { "title": "Beta cells" },
+                    "assets": [
+                        {
+                            "relative_path": "b1.tif",
+                            "format": "TIFF",
+                            "index_status": "ready_for_conversion",
+                            "convert_command": "convert beta b1"
+                        },
+                        {
+                            "relative_path": "b2.tif",
+                            "format": "TIFF",
+                            "index_status": "ready_for_conversion",
+                            "convert_command": "convert beta b2"
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn fixture_job(
+        status: &str,
+        dataset_slug: &str,
+        asset_relative_path: &str,
+        created_at_ms: u64,
+    ) -> IndexJobRecord {
+        IndexJobRecord {
+            id: format!("job_{created_at_ms}"),
+            kind: "convert".to_string(),
+            dataset_slug: dataset_slug.to_string(),
+            asset_relative_path: asset_relative_path.to_string(),
+            status: status.to_string(),
+            created_at_ms,
+            started_at_ms: None,
+            finished_at_ms: None,
+            exit_code: None,
+            pid: None,
+            command: vec!["python3".to_string()],
+            command_display: "python3 convert".to_string(),
+            log: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn batch_plan_applies_total_and_per_dataset_limits() {
+        let queue = fixture_queue();
+        let request = IndexBatchPlanRequest {
+            kind: "convert".to_string(),
+            dataset_slug: None,
+            total_limit: Some(3),
+            per_dataset_limit: Some(1),
+            retry_failed: None,
+            skip_completed: None,
+        };
+
+        let plan = build_index_batch_plan(&queue, &BTreeMap::new(), &request).unwrap();
+        assert_eq!(plan["summary"]["candidate_count"], 4);
+        assert_eq!(plan["summary"]["planned_count"], 2);
+        assert_eq!(plan["summary"]["skipped_limit"], 2);
+        assert_eq!(
+            plan["items"].as_array().unwrap()[0]["dataset_slug"],
+            "alpha"
+        );
+        assert_eq!(plan["items"].as_array().unwrap()[1]["dataset_slug"], "beta");
+    }
+
+    #[test]
+    fn batch_plan_skips_active_and_requires_retry_failed_flag() {
+        let queue = fixture_queue();
+        let mut jobs = BTreeMap::new();
+        jobs.insert(
+            "active".to_string(),
+            fixture_job("running", "alpha", "a1.tif", 1),
+        );
+        jobs.insert(
+            "failed".to_string(),
+            fixture_job("failed", "alpha", "a2.tif", 2),
+        );
+
+        let request = IndexBatchPlanRequest {
+            kind: "convert".to_string(),
+            dataset_slug: Some("alpha".to_string()),
+            total_limit: Some(4),
+            per_dataset_limit: Some(4),
+            retry_failed: Some(false),
+            skip_completed: None,
+        };
+        let plan = build_index_batch_plan(&queue, &jobs, &request).unwrap();
+        assert_eq!(plan["summary"]["planned_count"], 0);
+        assert_eq!(plan["summary"]["skipped_active"], 1);
+        assert_eq!(plan["summary"]["skipped_previous_failed"], 1);
+
+        let retry_request = IndexBatchPlanRequest {
+            retry_failed: Some(true),
+            ..request
+        };
+        let retry_plan = build_index_batch_plan(&queue, &jobs, &retry_request).unwrap();
+        assert_eq!(retry_plan["summary"]["planned_count"], 1);
+        assert_eq!(
+            retry_plan["items"].as_array().unwrap()[0]["asset_relative_path"],
+            "a2.tif"
+        );
+    }
+
+    #[test]
+    fn batch_run_from_plan_tracks_pending_items_and_concurrency() {
+        let queue = fixture_queue();
+        let request = IndexBatchPlanRequest {
+            kind: "convert".to_string(),
+            dataset_slug: None,
+            total_limit: Some(2),
+            per_dataset_limit: Some(2),
+            retry_failed: None,
+            skip_completed: None,
+        };
+        let plan = build_index_batch_plan(&queue, &BTreeMap::new(), &request).unwrap();
+
+        let run = build_index_batch_run_from_plan(&plan, Some(2)).unwrap();
+        assert_eq!(run.plan_id, plan["plan_id"].as_str().unwrap());
+        assert_eq!(run.kind, "convert");
+        assert_eq!(run.concurrency, 2);
+        assert_eq!(run.status, "queued");
+        assert_eq!(run.summary.total, 2);
+        assert_eq!(run.summary.pending, 2);
+        assert_eq!(run.items[0].dataset_slug, "alpha");
+        assert!(run.checkpoint_path.ends_with(".json"));
+    }
+
+    #[test]
+    fn batch_run_reconciles_terminal_child_job_status() {
+        let queue = fixture_queue();
+        let request = IndexBatchPlanRequest {
+            kind: "convert".to_string(),
+            dataset_slug: Some("alpha".to_string()),
+            total_limit: Some(1),
+            per_dataset_limit: Some(1),
+            retry_failed: None,
+            skip_completed: None,
+        };
+        let plan = build_index_batch_plan(&queue, &BTreeMap::new(), &request).unwrap();
+        let mut run = build_index_batch_run_from_plan(&plan, Some(1)).unwrap();
+        run.items[0].status = "running".to_string();
+        run.items[0].job_id = Some("child".to_string());
+
+        let mut jobs = BTreeMap::new();
+        let mut job = fixture_job("completed", "alpha", "a1.tif", 42);
+        job.id = "child".to_string();
+        job.started_at_ms = Some(43);
+        job.finished_at_ms = Some(44);
+        jobs.insert(job.id.clone(), job);
+
+        reconcile_index_batch_items(&mut run, &jobs);
+        assert_eq!(run.items[0].status, "completed");
+        assert_eq!(run.items[0].started_at_ms, Some(43));
+        assert_eq!(run.items[0].finished_at_ms, Some(44));
+    }
+
+    #[test]
+    fn batch_resume_requires_retry_flag_for_failed_items() {
+        let queue = fixture_queue();
+        let request = IndexBatchPlanRequest {
+            kind: "convert".to_string(),
+            dataset_slug: Some("alpha".to_string()),
+            total_limit: Some(2),
+            per_dataset_limit: Some(2),
+            retry_failed: None,
+            skip_completed: None,
+        };
+        let plan = build_index_batch_plan(&queue, &BTreeMap::new(), &request).unwrap();
+        let mut run = build_index_batch_run_from_plan(&plan, Some(1)).unwrap();
+        run.status = "failed".to_string();
+        run.items[0].status = "completed".to_string();
+        run.items[1].status = "failed".to_string();
+
+        assert!(prepare_index_batch_resume(&mut run.clone(), false).is_err());
+        prepare_index_batch_resume(&mut run, true).unwrap();
+        assert_eq!(run.status, "queued");
+        assert_eq!(run.items[0].status, "completed");
+        assert_eq!(run.items[1].status, "pending");
+        assert_eq!(run.summary.pending, 1);
+    }
 }
 
 // ==========================================
@@ -3688,10 +5373,11 @@ async fn main() {
         eprintln!("Failed to seed in-memory SQLite database: {:?}", e);
         std::process::exit(1);
     }
-    
+
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         index_jobs: Arc::new(Mutex::new(BTreeMap::new())),
+        index_batch_runs: Arc::new(Mutex::new(load_index_batch_runs())),
     };
 
     let app = Router::new()
@@ -3701,22 +5387,59 @@ async fn main() {
         .route("/api/volume/workbench-data", get(handle_workbench_data))
         .route("/api/volume/open-local", get(handle_open_local))
         .route("/api/volume/index-queue", get(handle_index_queue))
-        .route("/api/volume/index-jobs", get(handle_list_index_jobs).post(handle_start_index_job))
-        .route("/api/volume/index-jobs/:job_id/cancel", post(handle_cancel_index_job))
-        .route("/api/volume/index-jobs/:job_id/retry", post(handle_retry_index_job))
+        .route(
+            "/api/volume/index-jobs",
+            get(handle_list_index_jobs).post(handle_start_index_job),
+        )
+        .route(
+            "/api/volume/index-batch-plan",
+            post(handle_index_batch_plan),
+        )
+        .route(
+            "/api/volume/index-batch-runs",
+            get(handle_list_index_batch_runs).post(handle_start_index_batch_run),
+        )
+        .route(
+            "/api/volume/index-batch-runs/:run_id/cancel",
+            post(handle_cancel_index_batch_run),
+        )
+        .route(
+            "/api/volume/index-batch-runs/:run_id/resume",
+            post(handle_resume_index_batch_run),
+        )
+        .route(
+            "/api/volume/index-jobs/:job_id/cancel",
+            post(handle_cancel_index_job),
+        )
+        .route(
+            "/api/volume/index-jobs/:job_id/retry",
+            post(handle_retry_index_job),
+        )
         .route("/api/datasets", get(handle_search))
         .route("/api/datasets/export", get(handle_export))
         .route("/api/datasets/facets", get(handle_facets))
         .route("/api/datasets/analytics/cross-tab", get(handle_cross_tab))
         .route("/api/datasets/analytics/frontier", get(handle_frontier))
         .route("/api/datasets/analytics/toolkit", get(handle_toolkit))
-        .route("/api/datasets/analytics/measurement-grammar", get(handle_measurement_grammar))
-        .route("/api/datasets/analytics/reusability-map", get(handle_reusability_map))
-        .route("/api/datasets/analytics/coverage-atlas", get(handle_coverage_atlas))
+        .route(
+            "/api/datasets/analytics/measurement-grammar",
+            get(handle_measurement_grammar),
+        )
+        .route(
+            "/api/datasets/analytics/reusability-map",
+            get(handle_reusability_map),
+        )
+        .route(
+            "/api/datasets/analytics/coverage-atlas",
+            get(handle_coverage_atlas),
+        )
         .route("/api/datasets/analytics/timeline", get(handle_timeline))
         .route("/api/datasets/analytics/benchmarks", get(handle_benchmarks))
         .route("/api/datasets/analytics/plan", get(handle_plan))
-        .route("/api/datasets/analytics/plan/export", get(handle_plan_export))
+        .route(
+            "/api/datasets/analytics/plan/export",
+            get(handle_plan_export),
+        )
         .route("/api/datasets/:dataset_id", get(handle_get_dataset))
         .route("/api/datasets/:dataset_id/similar", get(handle_get_similar))
         .route("/api/datasets/compare", axum::routing::post(handle_compare))
@@ -3744,7 +5467,10 @@ async fn main() {
         .unwrap_or(8080);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    println!("Cell Anatomy Volumetric Sidecar + SQLite engine running on http://{}", addr);
+    println!(
+        "Cell Anatomy Volumetric Sidecar + SQLite engine running on http://{}",
+        addr
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

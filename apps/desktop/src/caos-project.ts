@@ -51,6 +51,8 @@ export type CaosArchiveStatus = {
   assetId?: string;
   archiveId?: string;
   relativePath?: string;
+  worksetId?: string;
+  worksetTitle?: string;
   assetStatus?: string;
   fixityStatus?: string;
   publicationStatus?: string;
@@ -513,6 +515,8 @@ const validateArchiveStatus = (value: unknown, path: string): CaosArchiveStatus 
     assetId: requireOptionalString(status.assetId, `${path}.assetId`),
     archiveId: requireOptionalString(status.archiveId, `${path}.archiveId`),
     relativePath: requireOptionalString(status.relativePath, `${path}.relativePath`),
+    worksetId: requireOptionalString(status.worksetId, `${path}.worksetId`),
+    worksetTitle: requireOptionalString(status.worksetTitle, `${path}.worksetTitle`),
     assetStatus: requireOptionalString(status.assetStatus, `${path}.assetStatus`),
     fixityStatus: requireOptionalString(status.fixityStatus, `${path}.fixityStatus`),
     publicationStatus: requireOptionalString(status.publicationStatus, `${path}.publicationStatus`),

@@ -54,6 +54,8 @@ const derivative = {
     assetId: "fixture-asset",
     archiveId: "fixture-archive",
     relativePath: "volumes/sample.ome.zarr",
+    worksetId: "fixture-workset",
+    worksetTitle: "Fixture Workset",
     assetStatus: "discovered",
     fixityStatus: "checksummed",
     publicationStatus: "unknown",
@@ -171,6 +173,8 @@ test("CAOS project snapshot builds, serializes, parses, and preserves core state
   assert.equal(parsed.volumes[0].sourceSha256, derivative.source_sha256);
   assert.equal(parsed.volumes[0].sourceSizeBytes, derivative.source_size_bytes);
   assert.equal(parsed.volumes[0].archiveStatus.registryId, "fixture-registry");
+  assert.equal(parsed.volumes[0].archiveStatus.worksetId, "fixture-workset");
+  assert.equal(parsed.volumes[0].archiveStatus.worksetTitle, "Fixture Workset");
   assert.equal(parsed.volumes[0].archiveStatus.rightsStatus, "unknown");
   assert.deepEqual(parsed.volumes[0].archiveStatus.blockers, ["blocked_permission"]);
   assert.equal(parsed.measurements[0].id, measurement.id);
