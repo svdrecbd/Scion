@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 INGESTION_DIR = Path(__file__).resolve().parents[1]
@@ -240,6 +241,8 @@ class ArchiveRegistryTests(unittest.TestCase):
             self.assertTrue((registry_dir / "private-registry-search-index.jsonl").exists())
             self.assertTrue((registry_dir / "private-registry-review-queue.csv").exists())
             self.assertTrue((registry_dir / "private-registry-volume-candidates.csv").exists())
+            self.assertFalse((registry_dir / ".private-registry-build.sqlite").exists())
+            self.assertFalse((registry_dir / "private-registry-assets.jsonl.inprogress").exists())
 
             assets = self.read_jsonl(registry_dir / "private-registry-assets.jsonl")
             by_path = {asset["relative_path"]: asset for asset in assets}
@@ -307,6 +310,134 @@ class ArchiveRegistryTests(unittest.TestCase):
             summary = json.loads((registry_dir / "private-registry.json").read_text())
             self.assertEqual(summary["registry_id"], "cli-registry")
 
+    def test_import_scan_streams_large_manifest_through_disposable_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_dir = Path(temp_dir) / "scan"
+            registry_dir = Path(temp_dir) / "registry"
+            scan_dir.mkdir()
+            record_count = 2000
+            (scan_dir / "inventory-summary.json").write_text(
+                json.dumps(
+                    {
+                        "archive_id": "large-fixture",
+                        "root": "/large-fixture",
+                        "scanner": "fixture",
+                        "started_at": "2026-08-12T00:00:00Z",
+                        "finished_at": "2026-08-12T00:01:00Z",
+                        "file_count": record_count,
+                        "bytes_total": record_count,
+                    }
+                )
+            )
+            with (scan_dir / "file-manifest.jsonl").open("w") as manifest:
+                for index in range(record_count):
+                    manifest.write(
+                        json.dumps(
+                            {
+                                "archive_id": "large-fixture",
+                                "root": "/large-fixture",
+                                "relative_path": f"batch/{index:06d}.bin",
+                                "name": f"{index:06d}.bin",
+                                "extension": ".bin",
+                                "path_type": "file",
+                                "size_bytes": 1,
+                                "modified_at": "2026-08-12T00:00:00Z",
+                                "likely_role": "unknown",
+                            }
+                        )
+                        + "\n"
+                    )
+
+            summary = registry.build_private_registry(
+                scan_dir,
+                registry_dir,
+                registry_id="large-registry",
+            )
+
+            self.assertEqual(summary["asset_count"], record_count)
+            with (registry_dir / "private-registry-assets.jsonl").open() as assets:
+                self.assertEqual(sum(1 for line in assets if line.strip()), record_count)
+            self.assertFalse((registry_dir / ".private-registry-build.sqlite").exists())
+            self.assertFalse((registry_dir / "private-registry-assets.jsonl.inprogress").exists())
+
+    def test_apply_status_overlay_rebuilds_curated_registry_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, scan_dir = self.make_scan(temp_dir)
+            registry_dir = Path(temp_dir) / "registry"
+            curated_dir = Path(temp_dir) / "curated-registry"
+            overlay_path = Path(temp_dir) / "status-overlay.csv"
+            registry.build_private_registry(scan_dir, registry_dir, registry_id="fixture-registry")
+            overlay_path.write_text(
+                "\n".join(
+                    [
+                        "relative_path,rights_status,triage_status,publication_status,blocked_states,review_required,can_view_in_caos,can_convert",
+                        "raw/cell.mrc,internal_use,candidate,unpublished,none,false,true,true",
+                    ]
+                )
+                + "\n"
+            )
+
+            summary = registry.apply_status_overlay(
+                registry_dir,
+                overlay_path,
+                curated_dir,
+                registry_id="fixture-registry-curated",
+            )
+
+            self.assertEqual(summary["registry_id"], "fixture-registry-curated")
+            self.assertEqual(summary["status_overlay"]["applied_rows"], 1)
+            self.assertEqual(summary["project_ready_count"], 1)
+            assets = self.read_jsonl(curated_dir / "private-registry-assets.jsonl")
+            by_path = {asset["relative_path"]: asset for asset in assets}
+            mrc = by_path["raw/cell.mrc"]
+            self.assertEqual(mrc["registry_id"], "fixture-registry-curated")
+            self.assertEqual(mrc["status"]["rights_status"], "internal_use")
+            self.assertTrue(mrc["status"]["allowed_operations"]["can_convert"])
+            self.assertTrue(mrc["status"]["allowed_operations"]["can_view_in_caos"])
+            self.assertEqual(mrc["readiness"]["blockers"], [])
+            self.assertTrue(mrc["readiness"]["conversion_ready"])
+            self.assertTrue(mrc["readiness"]["project_ready"])
+            self.assertTrue((curated_dir / "status-overlay-unmatched.csv").exists())
+
+    def test_apply_status_overlay_cli_prints_machine_readable_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, scan_dir = self.make_scan(temp_dir)
+            registry_dir = Path(temp_dir) / "registry"
+            curated_dir = Path(temp_dir) / "curated-registry"
+            overlay_path = Path(temp_dir) / "status-overlay.csv"
+            registry.build_private_registry(scan_dir, registry_dir, registry_id="fixture-registry")
+            overlay_path.write_text(
+                "\n".join(
+                    [
+                        "relative_path,rights_status,triage_status,publication_status,blocked_states,review_required,can_view_in_caos,can_convert",
+                        "raw/cell.mrc,internal_use,candidate,unpublished,none,false,true,true",
+                    ]
+                )
+                + "\n"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = registry.main(
+                    [
+                        "apply-status-overlay",
+                        str(registry_dir),
+                        "--overlay",
+                        str(overlay_path),
+                        "--output-dir",
+                        str(curated_dir),
+                        "--registry-id",
+                        "curated-cli-registry",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            status = json.loads(stdout.getvalue())
+            self.assertEqual(status["status"], "ok")
+            self.assertEqual(status["registry_id"], "curated-cli-registry")
+            self.assertEqual(status["overlay_applied_rows"], 1)
+            self.assertEqual(status["project_ready_count"], 1)
+
     def test_import_public_data_marks_converted_derivatives_project_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "public-data"
@@ -369,6 +500,113 @@ class ArchiveRegistryTests(unittest.TestCase):
             self.assertEqual(status["status"], "ok")
             self.assertEqual(status["registry_id"], "public-cli-registry")
             self.assertEqual(status["asset_count"], 2)
+
+    def test_promote_workset_writes_bounded_promotion_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, scan_dir = self.make_scan(temp_dir)
+            registry_dir = Path(temp_dir) / "registry"
+            workset_dir = Path(temp_dir) / "workset"
+            registry.build_private_registry(scan_dir, registry_dir, registry_id="fixture-registry")
+
+            workset = registry.build_workset(
+                registry_dir,
+                workset_dir,
+                registry.WorksetSelection(
+                    workset_id="candidate-workset",
+                    title="Candidate Workset",
+                    path_prefixes=["raw/"],
+                    volume_candidates_only=True,
+                    intended_operations=["review", "convert"],
+                    notes=["fixture promotion"],
+                ),
+            )
+
+            self.assertEqual(workset["schema"], "cell-anatomy-archive-workset")
+            self.assertEqual(workset["workset_id"], "candidate-workset")
+            self.assertEqual(workset["summary"]["selected_asset_count"], 4)
+            self.assertEqual(workset["summary"]["dataset_mode_ready_count"], 0)
+            self.assertIn("rights_unknown", {finding["code"] for finding in workset["findings"]})
+            self.assertIn("intended_operations_blocked", {finding["code"] for finding in workset["findings"]})
+            self.assertEqual(workset["promotion_rule"]["intended_operations"], ["review", "convert"])
+            self.assertEqual(workset["promotion_rule"]["destination_workset_dir"], str(workset_dir.resolve()))
+            self.assertTrue((workset_dir / "workset.json").exists())
+            self.assertTrue((workset_dir / "workset-assets.jsonl").exists())
+            self.assertTrue((workset_dir / "workset-assets.csv").exists())
+            self.assertTrue((workset_dir / "workset-review-queue.csv").exists())
+
+            records = self.read_jsonl(workset_dir / "workset-assets.jsonl")
+            self.assertEqual(len(records), 4)
+            self.assertTrue(all("convert" in record["promotion"]["blocked_operations"] for record in records))
+            self.assertTrue(all(record["promotion"]["intended_operations"] == ["review", "convert"] for record in records))
+
+    def test_workset_selection_enforces_hard_asset_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, scan_dir = self.make_scan(temp_dir)
+            registry_dir = Path(temp_dir) / "registry"
+            registry.build_private_registry(scan_dir, registry_dir, registry_id="fixture-registry")
+
+            with patch.object(registry, "MAX_WORKSET_ASSETS", 2):
+                with self.assertRaisesRegex(ValueError, "safety cap"):
+                    registry.select_workset_assets(
+                        registry_dir,
+                        registry.WorksetSelection(
+                            workset_id="too-large",
+                            title="Too Large",
+                            path_prefixes=["raw/"],
+                        ),
+                    )
+                with self.assertRaisesRegex(ValueError, "capped at 2"):
+                    registry.select_workset_assets(
+                        registry_dir,
+                        registry.WorksetSelection(
+                            workset_id="invalid-limit",
+                            title="Invalid Limit",
+                            path_prefixes=["raw/"],
+                            limit=3,
+                        ),
+                    )
+                selected = registry.select_workset_assets(
+                    registry_dir,
+                    registry.WorksetSelection(
+                        workset_id="bounded",
+                        title="Bounded",
+                        path_prefixes=["raw/"],
+                        limit=2,
+                    ),
+                )
+                self.assertEqual(len(selected), 2)
+
+    def test_promote_workset_cli_prints_machine_readable_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, scan_dir = self.make_scan(temp_dir)
+            registry_dir = Path(temp_dir) / "registry"
+            workset_dir = Path(temp_dir) / "workset"
+            registry.build_private_registry(scan_dir, registry_dir, registry_id="fixture-registry")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = registry.main(
+                    [
+                        "promote-workset",
+                        str(registry_dir),
+                        "--output-dir",
+                        str(workset_dir),
+                        "--workset-id",
+                        "cli-workset",
+                        "--path-prefix",
+                        "raw/",
+                        "--volume-candidates-only",
+                        "--intended-operation",
+                        "review",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            status = json.loads(stdout.getvalue())
+            self.assertEqual(status["status"], "ok")
+            self.assertEqual(status["workset_id"], "cli-workset")
+            self.assertEqual(status["selected_asset_count"], 4)
+            self.assertTrue((workset_dir / "workset.json").exists())
 
 
 if __name__ == "__main__":

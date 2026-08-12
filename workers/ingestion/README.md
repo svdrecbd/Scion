@@ -23,6 +23,15 @@ For the MVP, the goal is not full automation. The goal is a repeatable path from
 
 Use `archive_scanner.py` for the first read-only pass over lab-local archives before upload, conversion, or analysis. It is dependency-light and writes scanner artifacts outside the source tree.
 
+For a real archive run, follow `docs/archive-beachhead-runbook.md`. Preflight validates source/output separation, free space, the exclusive output lock, and checksum-resume identity without walking the archive:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead \
+  --preflight-only
+```
+
 Example fast inventory:
 
 ```bash
@@ -50,6 +59,18 @@ python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
   --resume-checksums
 ```
 
+For long archive runs, tune progress checkpoints so another shell or process can inspect the current state without waiting for completion:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead \
+  --checksum sha256 \
+  --resume-checksums \
+  --progress-interval-files 1000 \
+  --progress-interval-seconds 30
+```
+
 It writes:
 
 - `file-manifest.jsonl`
@@ -61,10 +82,31 @@ It writes:
 - `extension-summary.csv`
 - `largest-files.csv`
 - `scan-errors.csv`
+- `scan-progress.jsonl`
+- `scan-checkpoint.json`
+- `scan-state.sqlite`
+- `scan.lock`
 - `checksums.jsonl` when `--checksum sha256` is enabled
 - `fixity-run.json` when `--checksum sha256` is enabled
 
-The checksum resume mode reuses existing rows only when the relative path, checksum algorithm, file size, and modified timestamp still match. Duplicate detection is recalculated for the current scan order.
+The checksum resume mode uses `scan-state.sqlite` rather than an archive-sized Python dictionary. It reuses an existing digest only when relative path, algorithm, file size, modified timestamp, device, and inode match, and it rejects resume attempts when the archive id or source root changed. Duplicate tracking is also disk-backed. Primary JSONL/CSV results are staged as `.inprogress` files and replace the last completed artifacts only after a successful scan. `scan-progress.jsonl` is append-only across attempts, each attempt has a `run_id`, and `scan-checkpoint.json` is the latest machine-readable status for dashboards, tailing, or recovery after interruption. A restarted job re-enumerates the tree to reconcile additions and removals, but unchanged file bytes are not rehashed.
+
+After copying or mirroring an archive, compare the source and target scanner outputs:
+
+```bash
+python3 workers/ingestion/archive_scanner.py compare-scans \
+  ~/Downloads/cell-anatomy-archive-scan-source \
+  ~/Downloads/cell-anatomy-archive-scan-target \
+  --output-dir ~/Downloads/cell-anatomy-copy-verification \
+  --require-checksums
+```
+
+It writes:
+
+- `copy-verification-report.json`
+- `copy-verification-mismatches.csv`
+
+The comparison reconciles relative paths, path types, sizes, and checksum digests when present. It uses a disposable SQLite join index instead of holding both manifests in RAM. Use `--require-checksums` for backup or mirror verification where inventory-only comparison is not enough.
 
 The first extractor pass recognizes classic TIFF / OME-TIFF headers, MRC headers, Zarr `.zarray` metadata, and HDF5 signatures. Proprietary microscope formats are inventoried and classified as candidates, but still need follow-up extractors. `metadata-gaps.csv` is the review queue for missing dimensions, dtype, z depth, voxel size, unsupported extractors, and deferred HDF5 internals. `asset-status-ledger.jsonl` seeds every discovered file with conservative unknown rights/publication/triage status and disables cloud, conversion, sharing, and publication operations until a human or registry process upgrades the asset.
 
@@ -87,9 +129,45 @@ It writes:
 - `private-registry-review-queue.csv`
 - `private-registry-volume-candidates.csv`
 
-The importer joins file manifest rows, checksums, metadata extraction, metadata gaps, volume candidates, and asset status rows. Directory-backed volume candidates such as Zarr stores are represented as logical `directory_volume` assets even when the scanner only saw component files. Imported assets remain blocked for CAOS viewing, conversion, cloud backup, sharing, and publication until their rights and triage status are curated.
+The importer joins file manifest rows, checksums, metadata extraction, metadata gaps, volume candidates, and asset status rows through a disposable SQLite build index, streams final JSONL/CSV outputs, and replaces each final artifact only after the build completes. Directory-backed volume candidates such as Zarr stores are represented as logical `directory_volume` assets even when the scanner only saw component files. Imported assets remain blocked for CAOS viewing, conversion, cloud backup, sharing, and publication until their rights and triage status are curated.
 
-The native Workbench opens `private-registry.json` and queries `private-registry-assets.jsonl` through a bounded Rust command. React receives only the visible project-ready, conversion-queue, and review pages; it does not need to parse every registry asset row for desktop use.
+The native Workbench opens `private-registry.json` and builds a disposable `private-registry-index.sqlite` cache from `private-registry-assets.jsonl`. React receives only the visible project-ready, conversion-queue, and review pages; it does not need to parse every registry asset row for desktop use.
+
+Apply a curated status overlay after review decisions are available:
+
+```bash
+python3 workers/ingestion/archive_registry.py apply-status-overlay \
+  ~/Downloads/cell-anatomy-private-registry \
+  --overlay ~/Downloads/lbnl-status-overlay.csv \
+  --output-dir ~/Downloads/cell-anatomy-private-registry-curated \
+  --registry-id lbnl-beachhead-registry-curated
+```
+
+The overlay can be CSV or JSONL. Rows match by `asset_id` or `relative_path` and may update `publication_status`, `triage_status`, `rights_status`, `classification_status`, `review_required`, `review_notes`, `blocked_states`, and allowed-operation columns such as `can_view_in_caos`, `can_convert`, and `can_backup_to_cloud`. It writes a full rebuilt registry plus `status-overlay-unmatched.csv`; the original registry remains unchanged.
+
+Promote a bounded workset from selected registry assets before treating archive-estate records as Dataset / Repo Mode inputs:
+
+```bash
+python3 workers/ingestion/archive_registry.py promote-workset \
+  ~/Downloads/cell-anatomy-private-registry-curated \
+  --output-dir ~/Downloads/cell-anatomy-worksets/pilot-candidate \
+  --workset-id pilot-candidate \
+  --path-prefix raw/candidate-folder/ \
+  --volume-candidates-only \
+  --intended-operation review \
+  --intended-operation convert
+```
+
+It writes:
+
+- `workset.json`
+- `workset-assets.jsonl`
+- `workset-assets.csv`
+- `workset-review-queue.csv`
+
+The workset records source registry provenance, selected asset ids and paths, rights/triage/publication status, fixity coverage, metadata readiness, intended operations, blocked operations, and the destination workset directory. It does not copy raw bytes.
+
+Workset selection is hard-capped at 10,000 assets. Use `--limit` for intentionally smaller selections; selections that cross the cap fail and must be partitioned by path or another selector. Query selection scans the asset JSONL directly and does not construct a full-registry in-memory search map.
 
 For the local public-data pilot bundle, import `pilot-index.json` plus each dataset's readiness, derivative, validation, and asset-state manifests directly:
 

@@ -1,6 +1,6 @@
 # LBNL Data Beachhead
 
-This document is the working plan for using a multi-terabyte raw whole-cell imaging archive from Lawrence Berkeley National Laboratory as the forcing function for CAOS. The goal is not merely to back up the data or make a nicer viewer. The goal is to turn a real, messy, scientifically valuable archive into a governed, queryable, inspectable, analysis-ready data estate that CAOS can operate on from idea through publication support.
+This document is the working plan for using a roughly 90 TB raw whole-cell imaging archive from Lawrence Berkeley National Laboratory as the forcing function for CAOS. The goal is not merely to back up the data or make a nicer viewer. The goal is to turn a real, messy, scientifically valuable archive into a governed, queryable, inspectable, analysis-ready data estate that CAOS can operate on from idea through publication support.
 
 The current CAOS direction is local-first: the public Atlas provides discovery, literature context, accounts, and eventual project continuity; the desktop Workbench provides local volume inspection, measurement, annotation, jobs, exports, and project state. This archive should be treated as the first serious test of whether that product shape can support real scientific work.
 
@@ -52,7 +52,9 @@ That is what "idea to publication" should mean in practical terms. It should pro
 
 ## Scale Position
 
-The 4 TB LBNL archive is large enough to force the right architecture, but still small enough to test locally. A future intern with an 8 GB MacBook Air and a 30 TB lab archive can be productive if CAOS keeps three boundaries intact:
+The LBNL archive is now expected to be closer to 90 TB than 4 TB. That changes the operational posture substantially. CAOS should not treat the whole archive as one large dataset to load, convert, or mine directly. It should treat the archive as an estate: a governed raw store plus compact manifests, indexes, status ledgers, conversion selections, and project worksets.
+
+A future intern with an 8 GB MacBook Air and a 30-90 TB lab archive can still be productive if CAOS keeps three boundaries intact:
 
 - Inventory and fixity are streaming jobs that write append-only or resumable artifacts.
 - Search and triage operate on compact indexes, not directory walks or raw image reads at interaction time.
@@ -60,9 +62,75 @@ The 4 TB LBNL archive is large enough to force the right architecture, but still
 
 That does not mean every workflow will run well on the laptop. Full-archive conversion, segmentation, and high-throughput mining still need external drives, a workstation, or cloud/HPC compute. The feasible local promise is narrower and still valuable: inspect the archive, search it, pick subsets, validate metadata, launch resumable jobs, review results, and build publication evidence without needing the full library in RAM.
 
+The 90 TB revision makes copy/fixity/reporting infrastructure mandatory rather than optional. A full checksum or copy-verify pass may take days depending on sustained drive throughput, so every long operation must be resumable, externally inspectable, and safe to stop.
+
+## Operating Modes
+
+CAOS should support two connected modes instead of forcing one workflow onto every data scale.
+
+### Dataset / Repo Mode
+
+Use this mode for bounded, coherent datasets: a public-data repo, a known experiment folder, a validated OME-Zarr set, or a single local package that is small enough to work with directly.
+
+Suggested threshold:
+
+- usually under 1 TB
+- coherent source ownership and purpose
+- known modality or experiment structure
+- manageable file count
+- enough free local storage for derivatives or caches
+
+Workflow:
+
+1. Scan the dataset or repo.
+2. Checksum if practical or required.
+3. Import into the private registry.
+4. Convert selected assets.
+5. Generate slice caches or previews.
+6. Inspect in the Workbench.
+7. Measure, annotate, compare, and export publication evidence.
+
+This is the current CAOS inner loop. It remains valid and should stay fast.
+
+### Archive Estate Mode
+
+Use this mode for massive, mixed, long-lived lab archives: tens of TB, many unrelated projects, unclear provenance, mixed publication status, or unclear rights.
+
+Workflow:
+
+1. Record authority and access constraints.
+2. Run read-only inventory.
+3. Stage checksums and progress logs.
+4. Verify any backup or copy target.
+5. Import manifests into a private registry.
+6. Search, filter, and triage compact indexes.
+7. Promote selected assets into bounded worksets.
+8. Convert and inspect only those worksets.
+9. Export evidence packages from worksets, not from the whole archive.
+
+This is the CAOS outer loop. It controls the archive without pretending the archive is locally interactive.
+
+### Promotion Rule
+
+An archive asset becomes eligible for Dataset / Repo Mode only after a promotion decision records:
+
+- source archive and registry id
+- selected asset ids and paths
+- known rights/triage status
+- checksum or fixity status
+- metadata readiness
+- intended operation: inspect, convert, measure, publish, or review
+- destination workset directory or project id
+
+Promotion is the bridge between the 90 TB estate and the publication-focused Workbench loop.
+
+Current implementation status: `archive_registry.py apply-status-overlay` can rebuild a registry with curated rights, triage, publication, review, blocked-state, and allowed-operation decisions. `archive_registry.py promote-workset` then writes a bounded `workset.json` plus selected-asset JSONL/CSV sidecars. The promotion record captures registry provenance, selected asset ids and paths, rights/triage/publication status counts, checksum coverage, metadata readiness, intended operations, blocked operations, and the destination workset directory. The native Workbench can open `workset.json`, read `workset-assets.jsonl`, and show the promoted subset in the existing search, review, and conversion panels. Promotion and Workbench import do not copy raw bytes.
+
 ## Current Repo Support
 
 The first beachhead scanner now exists at `workers/ingestion/archive_scanner.py`. It is a read-only, dependency-light CLI for mapping an arbitrary local archive root before any upload, cleanup, conversion, or analysis.
+
+The operator sequence, stop conditions, interruption procedure, fixity acceptance checks, and restore boundary are recorded in `docs/archive-beachhead-runbook.md`. A real LBNL run should follow that runbook rather than invoking the examples below ad hoc.
 
 Fast inventory:
 
@@ -91,6 +159,18 @@ python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
   --resume-checksums
 ```
 
+Long-run checkpointed scan:
+
+```bash
+python3 workers/ingestion/archive_scanner.py scan /path/to/archive \
+  --output-dir ~/Downloads/cell-anatomy-archive-scan \
+  --archive-id lbnl-beachhead \
+  --checksum sha256 \
+  --resume-checksums \
+  --progress-interval-files 1000 \
+  --progress-interval-seconds 30
+```
+
 Current scanner artifacts:
 
 - `file-manifest.jsonl`
@@ -102,8 +182,25 @@ Current scanner artifacts:
 - `extension-summary.csv`
 - `largest-files.csv`
 - `scan-errors.csv`
+- `scan-progress.jsonl`
+- `scan-checkpoint.json`
 - `checksums.jsonl` when `--checksum sha256` is enabled
 - `fixity-run.json` when `--checksum sha256` is enabled
+
+Copy or mirror verification:
+
+```bash
+python3 workers/ingestion/archive_scanner.py compare-scans \
+  ~/Downloads/cell-anatomy-archive-scan-source \
+  ~/Downloads/cell-anatomy-archive-scan-target \
+  --output-dir ~/Downloads/cell-anatomy-copy-verification \
+  --require-checksums
+```
+
+Current copy verification artifacts:
+
+- `copy-verification-report.json`
+- `copy-verification-mismatches.csv`
 
 Private registry import:
 
@@ -121,6 +218,38 @@ Current registry artifacts:
 - `private-registry-search-index.jsonl`
 - `private-registry-review-queue.csv`
 - `private-registry-volume-candidates.csv`
+
+Curated status overlay:
+
+```bash
+python3 workers/ingestion/archive_registry.py apply-status-overlay \
+  ~/Downloads/cell-anatomy-private-registry \
+  --overlay ~/Downloads/lbnl-status-overlay.csv \
+  --output-dir ~/Downloads/cell-anatomy-private-registry-curated \
+  --registry-id lbnl-beachhead-registry-curated
+```
+
+Overlay rows can update publication, triage, rights, classification, review, blocked-state, and allowed-operation fields without rescanning raw data. The original registry remains unchanged.
+
+Bounded workset promotion:
+
+```bash
+python3 workers/ingestion/archive_registry.py promote-workset \
+  ~/Downloads/cell-anatomy-private-registry-curated \
+  --output-dir ~/Downloads/cell-anatomy-worksets/pilot-candidate \
+  --workset-id pilot-candidate \
+  --path-prefix raw/candidate-folder/ \
+  --volume-candidates-only \
+  --intended-operation review \
+  --intended-operation convert
+```
+
+Current workset artifacts:
+
+- `workset.json`
+- `workset-assets.jsonl`
+- `workset-assets.csv`
+- `workset-review-queue.csv`
 
 Pilot report generation:
 
@@ -157,7 +286,7 @@ Current tests:
 - `make test-ingestion` covers both the public-data pilot and archive scanner
 - `make check` now also includes the CAOS project-file tests through `desktop-test-caos`
 
-Important limitation: the scanner and registry importer are not yet a Workbench UI, a full progress-reporting job runner, or a cloud sync tool. They produce the first map, review queues, conservative asset status rows, and optional reusable fixity records so the next layer can be built from evidence.
+Important limitation: the scanner and registry importer are not yet a Workbench UI or a cloud sync tool. They produce the first map, live progress checkpoints, review queues, conservative asset status rows, optional reusable fixity records, and copy verification reports so the next layer can be built from evidence.
 
 ## Data Readiness Before Analysis
 
@@ -223,7 +352,7 @@ Current implementation status:
 
 ### 3. Checksums And Fixity
 
-Every raw file needs a stable identity. For 4 TB, checksumming is feasible but should be staged and resumable.
+Every raw file needs a stable identity. For 90 TB, checksumming is feasible only as a staged, resumable, externally inspectable operation. It should be possible to run fixity in windows, pause it, resume it, audit progress, and compare source and destination manifests without rereading the entire archive unnecessarily.
 
 Capture:
 
@@ -238,7 +367,7 @@ Capture:
 Required behavior:
 
 - resumable checksum jobs
-- progress log
+- progress log and periodic checkpoint report
 - skip unchanged files safely
 - recheck sample after copy
 - compare manifests between local and cloud copies
@@ -247,14 +376,21 @@ Minimum artifacts:
 
 - `checksums.jsonl`
 - `fixity-run.json`
+- `scan-progress.jsonl`
+- `scan-checkpoint.json`
 - `copy-verification-report.json`
+- `copy-verification-mismatches.csv`
 
 Current implementation status:
 
 - `archive_scanner.py scan --checksum sha256` emits `checksums.jsonl` and `fixity-run.json`.
-- `--resume-checksums` reuses existing checksum rows only when relative path, algorithm, size, and modified timestamp still match.
-- Duplicate files are detected by matching SHA-256 digests.
-- Post-copy verification reports are still pending.
+- `--resume-checksums` uses disk-backed `scan-state.sqlite` and reuses existing checksum rows only when relative path, algorithm, size, modified timestamp, device, and inode still match. Resume is rejected when the archive id or source root changes.
+- Duplicate files are detected by matching SHA-256 digests through the same disk-backed index rather than an archive-sized in-memory map.
+- Primary manifest/CSV artifacts are staged as `.inprogress` files and replace the last complete artifacts only after a successful traversal. An interrupted run therefore leaves the prior completed artifact set intact.
+- Every scanner attempt appends `run_id`-scoped events to `scan-progress.jsonl` and updates `scan-checkpoint.json`; the checkpoint cadence is configurable by file count and seconds.
+- `archive_scanner.py scan --preflight-only` validates source/output separation, free space, exclusive locking, and resume identity before a run.
+- `archive_scanner.py compare-scans` reconciles two scanner outputs through a disposable SQLite join index and writes `copy-verification-report.json` plus `copy-verification-mismatches.csv` without loading both manifests into RAM.
+- Cloud-provider-native checksum verification is still pending; current copy verification compares CAOS scanner artifacts after both sides have been scanned.
 
 ### 4. Metadata Extraction
 
@@ -539,8 +675,11 @@ Current implementation status:
 - Directory-backed candidates such as Zarr stores are represented as logical `directory_volume` assets.
 - Public-data OME-Zarr derivatives receive deterministic `sha256-tree-v1` composite checksums and can be marked `project_ready` when validation passed and local metadata is complete.
 - The desktop Workbench can open `private-registry.json`, validate the sibling asset/search artifacts, and show registry counts, searchable/filterable project-ready volumes, conversion-queue source assets, and review pressure in the Jobs tab.
-- The native desktop Workbench queries registry rows through a bounded Rust command that streams `private-registry-assets.jsonl` and returns only visible pages to React.
+- The native desktop Workbench builds a disposable `private-registry-index.sqlite` cache from `private-registry-assets.jsonl`, uses SQLite/FTS for registry search/filter paging, and returns only visible pages to React.
 - Conversion-queue registry rows can match the local sidecar index queue by dataset slug and relative path, then start the existing local conversion job when a conversion command is available.
+- Selected matched conversion-queue registry rows can now build the same bounded batch-plan shape as public pilot index plans, then start persisted batch runs with checkpoint/resume through the existing volume-engine runner.
+- The volume engine can build a dry-run batch conversion plan with total and per-dataset caps, active/completed job skipping, optional failed-job retry inclusion, and an exportable checkpoint payload.
+- The volume engine can start a persisted batch conversion run from that plan, keep concurrency bounded, checkpoint the run under the local Workbench state directory, cancel active children, and resume paused/failed runs. The Workbench exposes plan, start, concurrency, cancel, resume, checkpoint path, and recent-run status controls.
 - The public/private Atlas UI is not wired to the registry yet.
 
 ### 2. Read-Only Archive Scanner
@@ -764,7 +903,7 @@ This package should be useful for papers, supplements, internal review, grant fi
 
 ## Pilot Plan
 
-Do not start with all 4 TB. Start with three representative subsets.
+Do not start with the whole 90 TB estate. Start with three representative subsets.
 
 ### Pilot A: Published Dataset
 
@@ -907,14 +1046,10 @@ Exit criteria:
 
 ## Immediate Engineering Tasks
 
-1. Add a private Atlas route or desktop search mode backed by `private-registry-search-index.jsonl`.
-2. Promote the bounded native JSONL query path into a persistent local SQLite/FTS index for 100k+ row archives.
-3. Add batch conversion planning with per-dataset limits, retry policy, and resumable queue checkpoints.
-4. Add post-copy verification reports for local-to-cloud or local-to-drive backup tests.
-5. Add a progress log / checkpoint report around long checksum runs.
-6. Add a copy-compare command that reconciles two scanner outputs.
-7. Add a curated status overlay workflow for publication, triage, rights, and allowed operations.
-8. Keep synthetic scanner fixtures current as new file formats and failure modes are discovered.
+1. Add richer local extractors and fixtures as real LBNL formats and failure modes are discovered.
+2. Generalize the derivative factory beyond the public TIFF pilot so private worksets can run versioned TIFF/MRC/HDF5-to-OME-Zarr jobs with validation and collision protection.
+3. Add local mining summaries over bounded worksets: feature tables, duplicate/near-duplicate candidates, quality flags, morphology summaries, and publication-candidate evidence.
+4. Add cloud-provider-native copy verification where available, using source and remote checksums before or instead of rereading all bytes.
 
 Completed in the repo:
 
@@ -925,17 +1060,34 @@ Completed in the repo:
 - `volume-candidates.csv`
 - `asset-status-ledger.jsonl` conservative status seed
 - SHA-256 checksum mode
-- resumable checksum reuse for unchanged files
+- disk-backed resumable checksum reuse and duplicate tracking for unchanged files, bound to source archive id/root plus file device/inode identity
+- staged scanner artifacts that preserve the last complete outputs across interruption
+- scanner output-directory lock and `--preflight-only` safety report
+- scanner `scan-progress.jsonl` and `scan-checkpoint.json` artifacts for long-running inventory/checksum runs
+- `archive_scanner.py compare-scans` disk-backed copy/mirror verification reports over two scanner output directories
 - `workers/ingestion/archive_registry.py` private registry importer
+- disk-backed private registry import joins with streamed review/candidate outputs
 - `archive_registry.py import-public-data` public pilot registry adapter
 - `private-registry-assets.jsonl` first-pass registry asset schema
 - `private-registry-search-index.jsonl`
 - `private-registry-review-queue.csv`
+- `archive_registry.py apply-status-overlay` curated registry rebuilds for publication, triage, rights, blocked-state, and allowed-operation decisions
+- `status-overlay-unmatched.csv` audit output for overlay rows that did not match registry assets
+- `archive_registry.py promote-workset` bounded workset promotion artifacts with registry provenance
+- enforced 10,000-asset promotion cap and streaming query selection without a full-registry in-memory search map
+- `workset.json`, `workset-assets.jsonl`, `workset-assets.csv`, and `workset-review-queue.csv`
 - Workbench private registry reader for `private-registry.json`
 - Workbench registry panel grouping for project-ready assets, conversion queue assets, and review pressure
 - Workbench registry search/filter controls for path, format, dtype, status, metadata gaps, readiness, review pressure, and sidecar-matched conversion assets
 - Workbench bounded native registry query command that pages project-ready, conversion-queue, and review rows without loading full asset JSONL into React
+- Workbench disposable SQLite/FTS registry cache at `private-registry-index.sqlite`, rebuilt automatically when `private-registry-assets.jsonl` changes
+- Workbench `workset.json` opener that reads `workset-assets.jsonl`, normalizes promoted assets into the local registry model, shows selected workset scope/readiness, and reuses registry search/review/conversion panels
+- Workbench project creation and native save from an unambiguously matched project-ready registry/workset asset, with registry and workset provenance preserved in the project volume manifest
 - Workbench registry-to-index-queue bridge that can start matched local conversion jobs from conversion-queue rows
+- Workbench selected-registry conversion batch planner that turns matched private-registry conversion rows into persisted batch runs
+- Volume-engine dry-run batch conversion planner with total/per-dataset caps, active/completed job skips, failed-job retry policy, and checkpoint payloads
+- Volume-engine persisted batch conversion run registry with bounded concurrency, checkpoint files, cancel, resume, and child-job reconciliation
+- Workbench batch conversion plan controls, checkpoint export, configurable concurrency, start-run, cancel, resume, and recent-run status
 - archive/private status fields in CAOS project volume references
 - `workers/ingestion/archive_pilot_report.py` local pilot report generator
 - `pilot-report.json`, `pilot-report.md`, `pilot-assets.csv`, and `pilot-review-queue.csv`
