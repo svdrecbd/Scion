@@ -40,7 +40,8 @@
     ],
     "resources": {
       "../../../workers/ingestion/public_data_pilot.py": "workers/ingestion/public_data_pilot.py",
-      "../../../workers/ingestion/private_workset_derivative.py": "workers/ingestion/private_workset_derivative.py"
+      "../../../workers/ingestion/private_workset_derivative.py": "workers/ingestion/private_workset_derivative.py",
+      "../../../workers/ingestion/segmentation_pipeline.py": "workers/ingestion/segmentation_pipeline.py"
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

@@ -471,6 +471,22 @@ export type PackagedDataset = {
     physical_voxel_size_nm: Record<string, string | number>;
     validation?: CompatibilityReport;
     archiveStatus?: CaosArchiveStatus;
+    role?: "segmentation_labels" | string;
+    segmentation_id?: string;
+    source_volume_relative_path?: string;
+    task?: "cell" | "tooth" | "custom" | string;
+    label_name?: string;
+    method?: string;
+    review_state?: string;
+    human_review_required?: boolean;
+    validated_for_clinical_use?: boolean;
+    qc?: {
+      status?: string;
+      foreground_voxels?: number;
+      foreground_fraction?: number;
+      foreground_bbox_zyx_inclusive?: number[] | null;
+      checks?: Record<string, boolean>;
+    };
   }>;
   findings: Array<{
     finding_id: string;
@@ -494,6 +510,13 @@ type WorkbenchClientProps = {
 const clampIndex = (value: number, max: number) => {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(Math.round(value), Math.max(0, max - 1)));
+};
+
+const derivativeDefaultContrastMax = (
+  derivative: PackagedDataset["derivatives"][number] | null | undefined
+) => {
+  if (derivative?.role === "segmentation_labels") return 1;
+  return derivative?.dtype.includes("16") || derivative?.dtype === "uint16" ? 4095 : 255;
 };
 
 const parseNumberParam = (value: string | null, fallback: number) => {
@@ -551,6 +574,13 @@ const INDEX_JOB_STATUS_LABELS: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
+};
+
+const indexJobKindLabel = (kind: string) => {
+  if (kind === "convert") return "Convert";
+  if (kind === "slices") return "Slice Cache";
+  if (kind === "segment") return "Segmentation";
+  return kind;
 };
 
 const PRIVATE_REGISTRY_QUEUE_FILTER_LABELS: Record<PrivateRegistryQueueFilter, string> = {
@@ -1223,6 +1253,13 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const [indexQueueStatus, setIndexQueueStatus] = useState<string | null>(null);
   const [indexJobs, setIndexJobs] = useState<IndexJobRecord[]>([]);
   const [indexJobsLoading, setIndexJobsLoading] = useState(false);
+  const [segmentationTask, setSegmentationTask] = useState<"cell" | "tooth">("cell");
+  const [segmentationThreshold, setSegmentationThreshold] = useState(128);
+  const [segmentationOperator, setSegmentationOperator] = useState<"ge" | "gt" | "le" | "lt">("ge");
+  const [segmentationLabelName, setSegmentationLabelName] = useState("cell");
+  const [segmentationLoading, setSegmentationLoading] = useState(false);
+  const [segmentationStatus, setSegmentationStatus] = useState<string | null>(null);
+  const [segmentationError, setSegmentationError] = useState<string | null>(null);
   const [indexBatchPlan, setIndexBatchPlan] = useState<IndexBatchPlanResponse | null>(null);
   const [indexBatchScope, setIndexBatchScope] = useState<"active" | "all">("active");
   const [indexBatchTotalLimit, setIndexBatchTotalLimit] = useState(3);
@@ -1598,7 +1635,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     slug: string,
     targetDeriv: PackagedDataset["derivatives"][number] | undefined | null
   ) => {
-    const maxVal = targetDeriv?.dtype.includes("16") || targetDeriv?.dtype === "uint16" ? 4095 : 255;
+    const maxVal = derivativeDefaultContrastMax(targetDeriv);
     updateUrlParams({
       dataset: slug,
       asset: targetDeriv ? targetDeriv.source_relative_path : null,
@@ -2095,7 +2132,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
     const targetDeriv = targetDataset?.derivatives[0];
     
     // Choose sensible default limits based on voxel types
-    const maxVal = targetDeriv?.dtype.includes("16") || targetDeriv?.dtype === "uint16" ? 4095 : 255;
+    const maxVal = derivativeDefaultContrastMax(targetDeriv);
 
     updateUrlParams({
       dataset: slug,
@@ -2117,7 +2154,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
   const handleAssetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const path = e.target.value;
     const targetDeriv = activeDataset?.derivatives.find((d) => d.source_relative_path === path);
-    const maxVal = targetDeriv?.dtype.includes("16") || targetDeriv?.dtype === "uint16" ? 4095 : 255;
+    const maxVal = derivativeDefaultContrastMax(targetDeriv);
 
     updateUrlParams({
       asset: path,
@@ -3182,6 +3219,10 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
         setLocalDatasets(freshData);
         setIndexQueue(freshQueue);
         setIndexQueueStatus(`Completed ${newlyCompleted.length} index job${newlyCompleted.length === 1 ? "" : "s"} and refreshed Workbench data.`);
+        if (newlyCompleted.some((job) => job.kind === "segment")) {
+          setSegmentationStatus("Segmentation completed and passed artifact validation. Select the new LABEL asset to inspect it.");
+          setSegmentationError(null);
+        }
       }
     } catch (error) {
       if (!options?.silent) {
@@ -3211,6 +3252,39 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       setIndexJobs((previous) => [payload.job!, ...previous.filter((job) => job.id !== payload.job!.id)]);
     }
     return payload.job;
+  };
+
+  const startSegmentationCandidate = async () => {
+    if (!activeDataset || !activeDerivative) return;
+    if (activeDerivative.role === "segmentation_labels") {
+      setSegmentationError("Select the source intensity volume before starting segmentation.");
+      return;
+    }
+    setSegmentationLoading(true);
+    setSegmentationError(null);
+    setSegmentationStatus("Starting local segmentation candidate.");
+    try {
+      const payload = await volumeJson<IndexJobResponse>("/api/volume/segmentation-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          dataset_slug: activeDataset.slug,
+          asset_relative_path: activeDerivative.source_relative_path,
+          task: segmentationTask,
+          threshold: segmentationThreshold,
+          operator: segmentationOperator,
+          label_name: segmentationLabelName.trim() || segmentationTask,
+        }),
+      });
+      if (payload.job) {
+        setIndexJobs((previous) => [payload.job!, ...previous.filter((job) => job.id !== payload.job!.id)]);
+        setSegmentationStatus("Segmentation is running locally. A passed candidate label volume will appear in the asset selector when complete.");
+      }
+    } catch (error) {
+      setSegmentationError(error instanceof Error ? error.message : "Could not start segmentation.");
+      setSegmentationStatus(null);
+    } finally {
+      setSegmentationLoading(false);
+    }
   };
 
   const loadIndexBatchRuns = async (options?: { silent?: boolean }) => {
@@ -3588,7 +3662,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
       });
       if (payload.job) {
         setIndexJobs((previous) => [payload.job!, ...previous.filter((existing) => existing.id !== payload.job!.id)]);
-        setIndexQueueStatus(`Retried ${job.kind === "convert" ? "conversion" : "slice-cache"} job for ${job.asset_relative_path}.`);
+        setIndexQueueStatus(`Retried ${indexJobKindLabel(job.kind).toLowerCase()} job for ${job.asset_relative_path}.`);
       }
     } catch (error) {
       setIndexQueueError(error instanceof Error ? error.message : "Could not retry index job.");
@@ -4376,7 +4450,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
           >
             {activeDataset?.derivatives.map((deriv) => (
               <option key={deriv.source_relative_path} value={deriv.source_relative_path}>
-                {deriv.source_relative_path.split("/").pop()}
+                {deriv.role === "segmentation_labels" ? `[LABEL · ${(deriv.task || "custom").toUpperCase()}] ${deriv.label_name || deriv.segmentation_id}` : deriv.source_relative_path.split("/").pop()}
               </option>
             )) || <option value="">No assets found</option>}
           </select>
@@ -5331,6 +5405,27 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                 </span>
               </div>
 
+              {activeDerivative?.role === "segmentation_labels" ? (
+                <div style={{ border: "1px solid rgba(198, 111, 45, 0.48)", background: "rgba(198, 111, 45, 0.08)", padding: "9px 10px", display: "grid", gap: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", fontFamily: "var(--font-display)" }}>
+                    <strong style={{ color: "var(--atlas-orange)", fontSize: 10, textTransform: "uppercase" }}>
+                      Segmentation Candidate
+                    </strong>
+                    <span className="muted" style={{ fontSize: 9, textTransform: "uppercase" }}>
+                      {activeDerivative.review_state?.split("_").join(" ") || "review required"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, fontFamily: "var(--font-body)", lineHeight: 1.4 }}>
+                    {activeDerivative.label_name || activeDerivative.task || "Label"} · {activeDerivative.method || "registered labels"}
+                  </div>
+                  <div className="muted" style={{ fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>
+                    {activeDerivative.qc?.foreground_fraction === undefined
+                      ? "QC occupancy is unavailable."
+                      : `${(activeDerivative.qc.foreground_fraction * 100).toFixed(3)}% foreground (${(activeDerivative.qc.foreground_voxels || 0).toLocaleString()} voxels).`} Human review is required; this result is not validated for clinical use.
+                  </div>
+                </div>
+              ) : null}
+
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div>
                   <span className="muted" style={{ display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: 0, marginBottom: 2, fontFamily: "var(--font-display)", fontWeight: 600 }}>
@@ -6269,6 +6364,94 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
               </p>
             </div>
 
+            <div style={{ display: "grid", gap: 9, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: 8 }}>
+                <div>
+                  <span className="muted" style={{ display: "block", fontSize: 10, textTransform: "uppercase", fontFamily: "var(--font-display)", fontWeight: 600 }}>
+                    Segmentation
+                  </span>
+                  <strong style={{ display: "block", fontSize: 12, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
+                    Candidate Label Volume
+                  </strong>
+                </div>
+                <span style={{ color: "var(--atlas-orange)", fontSize: 9, fontFamily: "var(--font-display)", fontWeight: 700, textTransform: "uppercase" }}>
+                  Review Required
+                </span>
+              </div>
+              <p className="muted" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, fontFamily: "var(--font-body)" }}>
+                Run the deterministic threshold baseline to exercise the full label pipeline. It is a plumbing baseline, not a validated tooth or cell model.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
+                <label style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                  <span className="muted" style={{ textTransform: "uppercase" }}>Task</span>
+                  <select
+                    className="search-input"
+                    value={segmentationTask}
+                    onChange={(event) => {
+                      const task = event.target.value as "cell" | "tooth";
+                      setSegmentationTask(task);
+                      setSegmentationLabelName(task);
+                    }}
+                    style={{ width: "100%", padding: "5px 7px", fontSize: 10 }}
+                  >
+                    <option value="cell">Cell</option>
+                    <option value="tooth">Tooth</option>
+                  </select>
+                </label>
+                <label style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                  <span className="muted" style={{ textTransform: "uppercase" }}>Operator</span>
+                  <select
+                    className="search-input"
+                    value={segmentationOperator}
+                    onChange={(event) => setSegmentationOperator(event.target.value as "ge" | "gt" | "le" | "lt")}
+                    style={{ width: "100%", padding: "5px 7px", fontSize: 10 }}
+                  >
+                    <option value="ge">Intensity ≥</option>
+                    <option value="gt">Intensity &gt;</option>
+                    <option value="le">Intensity ≤</option>
+                    <option value="lt">Intensity &lt;</option>
+                  </select>
+                </label>
+                <label style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                  <span className="muted" style={{ textTransform: "uppercase" }}>Threshold</span>
+                  <input
+                    className="search-input"
+                    type="number"
+                    min={0}
+                    max={maxPossibleIntensity}
+                    value={segmentationThreshold}
+                    onChange={(event) => setSegmentationThreshold(Number(event.target.value))}
+                    style={{ width: "100%", padding: "5px 7px", fontSize: 10 }}
+                  />
+                </label>
+                <label style={{ display: "grid", gap: 3, fontSize: 9.5, fontFamily: "var(--font-display)" }}>
+                  <span className="muted" style={{ textTransform: "uppercase" }}>Label</span>
+                  <input
+                    className="search-input"
+                    value={segmentationLabelName}
+                    maxLength={80}
+                    onChange={(event) => setSegmentationLabelName(event.target.value)}
+                    style={{ width: "100%", padding: "5px 7px", fontSize: 10 }}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                className="button"
+                onClick={() => void startSegmentationCandidate()}
+                disabled={segmentationLoading || !activeDataset || !activeDerivative || activeDerivative.role === "segmentation_labels" || !Number.isFinite(segmentationThreshold)}
+                style={{ width: "100%", padding: "7px 10px", fontSize: 10.5 }}
+              >
+                {segmentationLoading ? "Starting…" : "Run Candidate Segmentation"}
+              </button>
+              {segmentationStatus ? (
+                <div style={{ color: "var(--atlas-blue-dark)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>{segmentationStatus}</div>
+              ) : null}
+              {segmentationError ? (
+                <div style={{ color: "var(--atlas-orange)", fontSize: 10, lineHeight: 1.35, fontFamily: "var(--font-body)" }}>{segmentationError}</div>
+              ) : null}
+            </div>
+
             <div style={{ display: "grid", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                 <div style={{ minWidth: 0 }}>
@@ -7089,7 +7272,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                     Background
                   </span>
                   <strong style={{ display: "block", fontSize: 12, color: "var(--foreground)", fontFamily: "var(--font-display)" }}>
-                    Index Jobs
+                    Volume Jobs
                   </strong>
                 </div>
                 <button type="button" className="button" onClick={() => loadIndexJobs()} disabled={indexJobsLoading} style={{ padding: "5px 8px", fontSize: 9.5 }}>
@@ -7116,7 +7299,7 @@ export function WorkbenchClient({ datasets }: WorkbenchClientProps) {
                         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
                           <div style={{ minWidth: 0 }}>
                             <strong style={{ display: "block", fontSize: 11, color: "var(--atlas-blue-dark)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-display)" }}>
-                              {job.kind === "convert" ? "Convert" : "Slice Cache"} | {job.asset_relative_path}
+                              {indexJobKindLabel(job.kind)} | {job.asset_relative_path}
                             </strong>
                             <span className="muted" style={{ display: "block", fontSize: 9.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {job.dataset_slug} | started {formatJobTime(job.started_at_ms || job.created_at_ms)}

@@ -183,7 +183,7 @@ Use `--relative-path` instead of `--asset-id` when that is the stable operator s
 
 Outputs are recipe-addressed under the workset's `derivatives/` directory. Each store includes OME-NGFF 0.4 metadata and `caos-provenance.json`; `workset-derivatives.json` records source fixity, recipe id, output tree checksum, value transform, shape, chunking, physical scale, and validation. Source SHA-256 is verified again immediately before conversion. Chunk writes are atomic and checkpointed with per-chunk SHA-256, so interrupted jobs can reuse intact chunks and rewrite corrupted or incomplete chunks. A completed derivative is immutable: checksum drift, target collisions, and a second recipe for the same active asset fail closed.
 
-Opening `workset.json` in the native Workbench registers it with the local volume engine. Conversion-ready rows then use the same bounded single-job and persisted batch-run controls as public pilot assets. Registrations persist in the local Workbench state directory across sidecar restarts, and completed derivatives enter `workbench-data` for slice/3D viewing. The packaged desktop includes both ingestion worker scripts; a `python3` runtime is still required on the workstation.
+Opening `workset.json` in the native Workbench registers it with the local volume engine. Conversion-ready rows then use the same bounded single-job and persisted batch-run controls as public pilot assets. Registrations persist in the local Workbench state directory across sidecar restarts, and completed derivatives enter `workbench-data` for slice/3D viewing. The packaged desktop includes the public-data, private-derivative, and segmentation worker scripts; a `python3` runtime is still required on the workstation.
 
 Emit the sidecar-compatible queue for operator inspection without converting:
 
@@ -191,6 +191,56 @@ Emit the sidecar-compatible queue for operator inspection without converting:
 python3 workers/ingestion/private_workset_derivative.py queue \
   --workset ~/Downloads/cell-anatomy-worksets/pilot-candidate/workset.json
 ```
+
+## Segmentation Label Pipeline
+
+`segmentation_pipeline.py` turns any Workbench-compatible, uncompressed uint8/uint16 Zarr v2 volume into an immutable, review-gated label artifact. The Workbench Jobs panel exposes the bundled threshold runner so the entire path can be exercised before a learned model is selected:
+
+```bash
+python3 workers/ingestion/segmentation_pipeline.py threshold \
+  --source /path/to/cell.ome.zarr \
+  --task cell \
+  --threshold 128 \
+  --operator ge \
+  --label-name "cell body"
+```
+
+The threshold runner is a deterministic plumbing baseline, not a reliable biological or clinical model. Every result is marked `unreviewed_candidate`, requires human review, and is explicitly not validated for clinical use. Empty/full masks, missing or malformed chunks, compression, filters, unsupported dtypes, source drift, output drift, path collisions, and failed label validation stop the run. Source chunks are read once and committed to a deterministic `sha256-zarr-array-v1` checksum; output chunks are written atomically with a resumable per-chunk SHA-256 checkpoint. Foreground count/fraction and an inclusive ZYX bounding box are recorded as structural QC.
+
+Learned tooth or cell models should emit a binary uint8 Zarr with the same shape and chunk grid as the source, then enter the identical artifact contract:
+
+```bash
+python3 workers/ingestion/segmentation_pipeline.py checksum \
+  --source /path/to/source.ome.zarr
+
+python3 workers/ingestion/segmentation_pipeline.py register \
+  --source /path/to/source.ome.zarr \
+  --labels /path/to/model-output.labels.zarr \
+  --task tooth \
+  --model-id tooth-net \
+  --model-version sha256:MODEL_WEIGHTS_DIGEST \
+  --expected-source-sha256 SOURCE_SHA256_ZARR_ARRAY_V1_DIGEST \
+  --label-name tooth
+```
+
+`--expected-source-sha256` must be the `sha256-zarr-array-v1` digest recorded by the model run for its input. Registration recomputes the current source array checksum and rejects labels produced against another same-shaped volume.
+
+Recipe-addressed labels are stored in a sibling `<source>.caos-segmentations/` directory and indexed by `<source>.caos-segmentations.json`; the immutable source store is never modified. The volume engine only advertises entries whose manifest source matches, output stays within that sibling directory, shape matches the source, and validation passed. Advertised labels appear as `[LABEL · CELL]` or `[LABEL · TOOTH]` assets and use the existing orthogonal slice and 3D readers.
+
+Evaluate a candidate against a fixed binary annotation volume with explicit acceptance thresholds:
+
+```bash
+python3 workers/ingestion/segmentation_pipeline.py evaluate \
+  --prediction /path/to/candidate.labels.ome.zarr \
+  --truth /path/to/annotation.labels.zarr \
+  --truth-id annotated-case-001-v1 \
+  --min-dice 0.90 \
+  --min-iou 0.82 \
+  --min-recall 0.90 \
+  --max-false-positive-rate 0.02
+```
+
+The immutable evaluation identity binds the prediction checksum, ground-truth id and checksum, and configured thresholds. The report records exact TP/FP/FN/TN counts plus Dice, IoU, precision, recall, specificity, false-positive rate, and accuracy. Passing one volume only marks that evaluation eligible; it does not promote the model. Cohort-level evaluation and human review remain required.
 
 For the local public-data pilot bundle, import `pilot-index.json` plus each dataset's readiness, derivative, validation, and asset-state manifests directly:
 

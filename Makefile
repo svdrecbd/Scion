@@ -2,7 +2,7 @@ SHELL := /bin/bash
 API_PYTHON ?= $(shell if [ -x apps/api/.venv/bin/python ]; then printf '%s' .venv/bin/python; elif command -v python3 >/dev/null 2>&1; then printf '%s' python3; else printf '%s' python; fi)
 PUBLIC_DATA_ROOT ?= $(HOME)/Downloads/scion-public-data
 
-.PHONY: bootstrap db-migrate db-seed api api-dev web web-dev web-install web-typecheck web-build desktop-typecheck desktop-test-caos desktop-build desktop-tauri-check volume-engine-check volume-engine-test smoke-web stack-up stack-down stack-status test-api test-ingestion pilot-index pilot-convert pilot-slices workset-convert workset-queue check
+.PHONY: bootstrap db-migrate db-seed api api-dev web web-dev web-install web-typecheck web-build desktop-typecheck desktop-test-caos desktop-build desktop-tauri-check volume-engine-check volume-engine-test smoke-web stack-up stack-down stack-status test-api test-ingestion pilot-index pilot-convert pilot-slices workset-convert workset-queue segment-threshold segment-register segment-evaluate check
 
 bootstrap:
 	bash scripts/bootstrap.sh
@@ -84,5 +84,14 @@ workset-convert:
 
 workset-queue:
 	python3 workers/ingestion/private_workset_derivative.py queue --workset "$(WORKSET)"
+
+segment-threshold:
+	python3 workers/ingestion/segmentation_pipeline.py threshold --source "$(SEGMENT_SOURCE)" --task "$(SEGMENT_TASK)" --threshold "$(SEGMENT_THRESHOLD)" $(if $(SEGMENT_OPERATOR),--operator "$(SEGMENT_OPERATOR)",) $(if $(SEGMENT_LABEL),--label-name "$(SEGMENT_LABEL)",)
+
+segment-register:
+	python3 workers/ingestion/segmentation_pipeline.py register --source "$(SEGMENT_SOURCE)" --labels "$(SEGMENT_LABELS)" --task "$(SEGMENT_TASK)" --model-id "$(SEGMENT_MODEL_ID)" --model-version "$(SEGMENT_MODEL_VERSION)" --expected-source-sha256 "$(SEGMENT_SOURCE_SHA256)" $(if $(SEGMENT_LABEL),--label-name "$(SEGMENT_LABEL)",)
+
+segment-evaluate:
+	python3 workers/ingestion/segmentation_pipeline.py evaluate --prediction "$(SEGMENT_PREDICTION)" --truth "$(SEGMENT_TRUTH)" --truth-id "$(SEGMENT_TRUTH_ID)" $(if $(SEGMENT_MIN_DICE),--min-dice "$(SEGMENT_MIN_DICE)",) $(if $(SEGMENT_MIN_IOU),--min-iou "$(SEGMENT_MIN_IOU)",) $(if $(SEGMENT_MIN_RECALL),--min-recall "$(SEGMENT_MIN_RECALL)",) $(if $(SEGMENT_MAX_FPR),--max-false-positive-rate "$(SEGMENT_MAX_FPR)",)
 
 check: test-api test-ingestion web-typecheck web-build desktop-typecheck desktop-test-caos desktop-build desktop-tauri-check volume-engine-check volume-engine-test smoke-web

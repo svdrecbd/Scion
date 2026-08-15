@@ -107,6 +107,16 @@ struct StartIndexJobRequest {
     asset_relative_path: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+struct StartSegmentationJobRequest {
+    dataset_slug: String,
+    asset_relative_path: String,
+    task: String,
+    threshold: f64,
+    operator: Option<String>,
+    label_name: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 struct RegisterPrivateWorksetRequest {
     workset_path: String,
@@ -271,6 +281,215 @@ struct DerivativeEntry {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct DerivativeManifest {
     derivatives: Vec<DerivativeEntry>,
+}
+
+const SEGMENTATION_ASSET_MARKER: &str = "#segmentation=";
+
+fn segmentation_manifest_path(source_output_path: &Path) -> Option<PathBuf> {
+    let parent = source_output_path.parent()?;
+    let name = source_output_path.file_name()?.to_str()?;
+    Some(parent.join(format!("{}.caos-segmentations.json", name)))
+}
+
+fn segmentation_asset_key(source_asset_path: &str, segmentation_id: &str) -> String {
+    format!(
+        "{}{}{}",
+        source_asset_path, SEGMENTATION_ASSET_MARKER, segmentation_id
+    )
+}
+
+fn locate_segmentation_derivative(
+    source: &DerivativeEntry,
+    requested_asset_path: &str,
+) -> Option<DerivativeEntry> {
+    let segmentation_id = requested_asset_path
+        .strip_prefix(&format!(
+            "{}{}",
+            source.source_relative_path, SEGMENTATION_ASSET_MARKER
+        ))?
+        .trim();
+    if segmentation_id.is_empty() {
+        return None;
+    }
+    let source_output = fs::canonicalize(&source.output_path).ok()?;
+    let manifest_path = segmentation_manifest_path(&source_output)?;
+    let manifest = read_json_value(&manifest_path)?;
+    if value_str(&manifest, "schema") != "cell-anatomy-segmentation-manifest"
+        || manifest
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            != Some(1)
+    {
+        return None;
+    }
+    let recorded_source = fs::canonicalize(value_str(&manifest, "source_output_path")).ok()?;
+    if recorded_source != source_output {
+        return None;
+    }
+    let allowed_root = manifest_path.parent()?.join(format!(
+        "{}.caos-segmentations",
+        source_output.file_name()?.to_str()?
+    ));
+    let allowed_root = fs::canonicalize(allowed_root).ok()?;
+    let candidate = manifest
+        .get("segmentations")?
+        .as_array()?
+        .iter()
+        .find(|item| value_str(item, "segmentation_id") == segmentation_id)?;
+    if candidate
+        .get("validation")
+        .and_then(|value| value.get("status"))
+        .and_then(|value| value.as_str())
+        != Some("passed")
+    {
+        return None;
+    }
+    let output_path = fs::canonicalize(value_str(candidate, "output_path")).ok()?;
+    if !output_path.starts_with(&allowed_root) {
+        return None;
+    }
+    let shape_zyx = candidate
+        .get("shape_zyx")
+        .and_then(|value| value.as_array())?
+        .iter()
+        .map(|value| value.as_u64().map(|item| item as usize))
+        .collect::<Option<Vec<_>>>()?;
+    if shape_zyx != source.shape_zyx {
+        return None;
+    }
+    let chunks_zyx = candidate
+        .get("chunks_zyx")
+        .and_then(|value| value.as_array())?
+        .iter()
+        .map(|value| value.as_u64().map(|item| item as usize))
+        .collect::<Option<Vec<_>>>()?;
+    Some(DerivativeEntry {
+        source_relative_path: requested_asset_path.to_string(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        shape_zyx,
+        chunks_zyx,
+        dtype: value_str(candidate, "dtype").to_string(),
+        physical_voxel_size_nm: source.physical_voxel_size_nm.clone(),
+    })
+}
+
+fn segmentation_derivative_payloads(source: &Value) -> Vec<Value> {
+    let Ok(source_entry) = serde_json::from_value::<DerivativeEntry>(source.clone()) else {
+        return Vec::new();
+    };
+    if source_entry
+        .source_relative_path
+        .contains(SEGMENTATION_ASSET_MARKER)
+    {
+        return Vec::new();
+    }
+    let Ok(source_output) = fs::canonicalize(&source_entry.output_path) else {
+        return Vec::new();
+    };
+    let Some(manifest_path) = segmentation_manifest_path(&source_output) else {
+        return Vec::new();
+    };
+    let Some(manifest) = read_json_value(&manifest_path) else {
+        return Vec::new();
+    };
+    if value_str(&manifest, "schema") != "cell-anatomy-segmentation-manifest"
+        || manifest
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            != Some(1)
+    {
+        return Vec::new();
+    }
+    let Ok(recorded_source) = fs::canonicalize(value_str(&manifest, "source_output_path")) else {
+        return Vec::new();
+    };
+    if recorded_source != source_output {
+        return Vec::new();
+    }
+    let Some(source_name) = source_output.file_name().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+    let Some(parent) = manifest_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(allowed_root) =
+        fs::canonicalize(parent.join(format!("{}.caos-segmentations", source_name)))
+    else {
+        return Vec::new();
+    };
+    let Some(entries) = manifest
+        .get("segmentations")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let segmentation_id = value_str(entry, "segmentation_id");
+            if segmentation_id.is_empty()
+                || entry
+                    .get("validation")
+                    .and_then(|value| value.get("status"))
+                    .and_then(|value| value.as_str())
+                    != Some("passed")
+            {
+                return None;
+            }
+            let output_path = fs::canonicalize(value_str(entry, "output_path")).ok()?;
+            if !output_path.starts_with(&allowed_root) {
+                return None;
+            }
+            let shape = entry.get("shape_zyx")?.as_array()?;
+            let shape_matches = shape.len() == source_entry.shape_zyx.len()
+                && shape
+                    .iter()
+                    .zip(&source_entry.shape_zyx)
+                    .all(|(left, right)| left.as_u64().map(|value| value as usize) == Some(*right));
+            if !shape_matches {
+                return None;
+            }
+            let mut derivative = entry.clone();
+            let object = derivative.as_object_mut()?;
+            object.insert(
+                "source_relative_path".to_string(),
+                Value::String(segmentation_asset_key(
+                    &source_entry.source_relative_path,
+                    segmentation_id,
+                )),
+            );
+            object.insert(
+                "source_local_path".to_string(),
+                Value::String(source_entry.output_path.clone()),
+            );
+            object.insert(
+                "output_path".to_string(),
+                Value::String(output_path.to_string_lossy().into_owned()),
+            );
+            object.insert(
+                "role".to_string(),
+                Value::String("segmentation_labels".to_string()),
+            );
+            object.insert(
+                "source_volume_relative_path".to_string(),
+                Value::String(source_entry.source_relative_path.clone()),
+            );
+            Some(derivative)
+        })
+        .collect()
+}
+
+fn attach_segmentation_derivatives(dataset: &mut Value) {
+    let Some(derivatives) = dataset
+        .get_mut("derivatives")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    let sources = derivatives.clone();
+    for source in &sources {
+        derivatives.extend(segmentation_derivative_payloads(source));
+    }
 }
 
 fn get_workbench_state_dir() -> PathBuf {
@@ -1766,12 +1985,32 @@ fn start_index_job(
 ) -> Result<IndexJobRecord, String> {
     let (kind, command, command_display, repo_root) =
         resolve_index_job_command(&request, &state.private_worksets)?;
+    start_resolved_job(
+        state,
+        kind,
+        request.dataset_slug,
+        request.asset_relative_path,
+        command,
+        command_display,
+        repo_root,
+    )
+}
+
+fn start_resolved_job(
+    state: &AppState,
+    kind: String,
+    dataset_slug: String,
+    asset_relative_path: String,
+    command: Vec<String>,
+    command_display: String,
+    repo_root: PathBuf,
+) -> Result<IndexJobRecord, String> {
     let id = unique_local_id("index_job");
     let record = IndexJobRecord {
         id: id.clone(),
         kind,
-        dataset_slug: request.dataset_slug,
-        asset_relative_path: request.asset_relative_path,
+        dataset_slug,
+        asset_relative_path,
         status: "queued".to_string(),
         created_at_ms: now_ms(),
         started_at_ms: None,
@@ -1798,6 +2037,94 @@ fn start_index_job(
     });
 
     Ok(record)
+}
+
+fn start_segmentation_job(
+    state: &AppState,
+    request: StartSegmentationJobRequest,
+) -> Result<IndexJobRecord, String> {
+    if !matches!(request.task.as_str(), "cell" | "tooth" | "custom") {
+        return Err("Unsupported segmentation task. Use cell, tooth, or custom.".to_string());
+    }
+    let operator = request.operator.as_deref().unwrap_or("ge").to_string();
+    if !matches!(operator.as_str(), "ge" | "gt" | "le" | "lt") {
+        return Err("Unsupported threshold operator. Use ge, gt, le, or lt.".to_string());
+    }
+    if !request.threshold.is_finite() {
+        return Err("Segmentation threshold must be finite.".to_string());
+    }
+    if request
+        .asset_relative_path
+        .contains(SEGMENTATION_ASSET_MARKER)
+    {
+        return Err("Select a source intensity volume, not an existing label volume.".to_string());
+    }
+    let entry = locate_zarr_derivative(
+        &request.dataset_slug,
+        &request.asset_relative_path,
+        &state.private_worksets,
+    )
+    .ok_or_else(|| "Source volume was not found.".to_string())?;
+    let label_name = request
+        .label_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&request.task)
+        .to_string();
+    if label_name.chars().count() > 80 || label_name.chars().any(char::is_control) {
+        return Err(
+            "Segmentation label name must be 80 printable characters or fewer.".to_string(),
+        );
+    }
+    {
+        let jobs = state
+            .index_jobs
+            .lock()
+            .map_err(|_| "Index job registry is unavailable.".to_string())?;
+        if jobs.values().any(|job| {
+            job.kind == "segment"
+                && job.dataset_slug == request.dataset_slug
+                && job.asset_relative_path == request.asset_relative_path
+                && is_active_index_status(&job.status)
+        }) {
+            return Err("A segmentation job is already active for this volume.".to_string());
+        }
+    }
+    let repo_root = get_repo_root();
+    let script = repo_root.join("workers/ingestion/segmentation_pipeline.py");
+    if !script.is_file() {
+        return Err(format!("Segmentation worker was not found: {:?}", script));
+    }
+    let command = vec![
+        "python3".to_string(),
+        script.to_string_lossy().into_owned(),
+        "threshold".to_string(),
+        "--source".to_string(),
+        entry.output_path,
+        "--task".to_string(),
+        request.task,
+        "--threshold".to_string(),
+        request.threshold.to_string(),
+        "--operator".to_string(),
+        operator,
+        "--label-name".to_string(),
+        label_name,
+    ];
+    let command_display = command
+        .iter()
+        .map(|value| shell_quote(value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    start_resolved_job(
+        state,
+        "segment".to_string(),
+        request.dataset_slug,
+        request.asset_relative_path,
+        command,
+        command_display,
+        repo_root,
+    )
 }
 
 fn mark_index_job_cancel_requested(
@@ -2305,6 +2632,11 @@ fn locate_zarr_derivative(
                                 if entry.source_relative_path == asset_path {
                                     return Some(entry);
                                 }
+                                if let Some(segmentation) =
+                                    locate_segmentation_derivative(&entry, asset_path)
+                                {
+                                    return Some(segmentation);
+                                }
                             }
                         }
                     }
@@ -2320,12 +2652,12 @@ fn locate_zarr_derivative(
     if let Some(path) = private_path {
         let dataset = private_workset_dataset_payload(&path).ok()?;
         let derivatives = dataset.get("derivatives")?.as_array()?;
-        return derivatives.into_iter().find_map(|value| {
-            if value_str(&value, "source_relative_path") == asset_path {
-                serde_json::from_value::<DerivativeEntry>(value.clone()).ok()
-            } else {
-                None
+        return derivatives.iter().find_map(|value| {
+            let entry = serde_json::from_value::<DerivativeEntry>(value.clone()).ok()?;
+            if entry.source_relative_path == asset_path {
+                return Some(entry);
             }
+            locate_segmentation_derivative(&entry, asset_path)
         });
     }
     let root = get_public_data_root();
@@ -2341,10 +2673,12 @@ fn locate_zarr_derivative(
 
     let file = File::open(manifest_path).ok()?;
     let manifest: DerivativeManifest = serde_json::from_reader(file).ok()?;
-    manifest
-        .derivatives
-        .into_iter()
-        .find(|d| d.source_relative_path == asset_path)
+    manifest.derivatives.into_iter().find_map(|entry| {
+        if entry.source_relative_path == asset_path {
+            return Some(entry);
+        }
+        locate_segmentation_derivative(&entry, asset_path)
+    })
 }
 
 fn parse_zarray(zattrs_dir: &Path) -> Option<Zarray> {
@@ -3139,6 +3473,19 @@ async fn handle_start_index_job(
     }
 }
 
+async fn handle_start_segmentation_job(
+    State(state): State<AppState>,
+    axum::extract::Json(payload): axum::extract::Json<StartSegmentationJobRequest>,
+) -> impl IntoResponse {
+    match start_segmentation_job(&state, payload) {
+        Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
+        Err(error) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": error }),
+        ),
+    }
+}
+
 async fn handle_index_batch_plan(
     State(state): State<AppState>,
     axum::extract::Json(payload): axum::extract::Json<IndexBatchPlanRequest>,
@@ -3375,7 +3722,7 @@ async fn handle_retry_index_job(
     AxumPath(job_id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let request = {
+    let previous = {
         let guard = match state.index_jobs.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -3385,23 +3732,38 @@ async fn handle_retry_index_job(
                 )
             }
         };
-        let job = match guard.get(&job_id) {
-            Some(job) => job,
+        match guard.get(&job_id) {
+            Some(job) => job.clone(),
             None => {
                 return json_response(
                     StatusCode::NOT_FOUND,
                     serde_json::json!({ "error": "Index job not found." }),
                 )
             }
-        };
-        StartIndexJobRequest {
-            kind: job.kind.clone(),
-            dataset_slug: job.dataset_slug.clone(),
-            asset_relative_path: job.asset_relative_path.clone(),
         }
     };
 
-    match start_index_job(&state, request) {
+    let result = if previous.kind == "segment" {
+        start_resolved_job(
+            &state,
+            previous.kind,
+            previous.dataset_slug,
+            previous.asset_relative_path,
+            previous.command,
+            previous.command_display,
+            get_repo_root(),
+        )
+    } else {
+        start_index_job(
+            &state,
+            StartIndexJobRequest {
+                kind: previous.kind,
+                dataset_slug: previous.dataset_slug,
+                asset_relative_path: previous.asset_relative_path,
+            },
+        )
+    };
+    match result {
         Ok(job) => json_response(StatusCode::ACCEPTED, serde_json::json!({ "job": job })),
         Err(error) => json_response(
             StatusCode::BAD_REQUEST,
@@ -3535,6 +3897,10 @@ async fn handle_workbench_data(State(state): State<AppState>) -> impl IntoRespon
                 }
             }
         }
+    }
+
+    for dataset in &mut packaged_datasets {
+        attach_segmentation_derivatives(dataset);
     }
 
     (
@@ -5790,6 +6156,66 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn segmentation_manifest_adds_a_confined_viewable_derivative() {
+        let root = std::env::temp_dir().join(unique_local_id("caos_segmentation_test"));
+        let source_output = root.join("cell.ome.zarr");
+        let segmentation_root = root.join("cell.ome.zarr.caos-segmentations");
+        let label_output = segmentation_root.join("fixture.labels.ome.zarr");
+        fs::create_dir_all(&source_output).unwrap();
+        fs::create_dir_all(&label_output).unwrap();
+        let source_output = source_output.canonicalize().unwrap();
+        let label_output = label_output.canonicalize().unwrap();
+        fs::write(
+            root.join("cell.ome.zarr.caos-segmentations.json"),
+            serde_json::to_vec(&json!({
+                "schema": "cell-anatomy-segmentation-manifest",
+                "schema_version": 1,
+                "source_output_path": source_output,
+                "segmentations": [{
+                    "segmentation_id": "fixture",
+                    "task": "cell",
+                    "label_name": "cell body",
+                    "output_path": label_output,
+                    "shape_zyx": [2, 3, 4],
+                    "chunks_zyx": [1, 3, 4],
+                    "dtype": "uint8",
+                    "validation": { "status": "passed" },
+                    "review_state": "unreviewed_candidate",
+                    "human_review_required": true
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let source = json!({
+            "source_relative_path": "raw/cell.mrc",
+            "output_path": source_output,
+            "shape_zyx": [2, 3, 4],
+            "chunks_zyx": [1, 3, 4],
+            "dtype": "uint16",
+            "physical_voxel_size_nm": { "z": 5.0, "y": 2.0, "x": 2.0 }
+        });
+
+        let derived = segmentation_derivative_payloads(&source);
+        assert_eq!(derived.len(), 1);
+        assert_eq!(
+            derived[0]["source_relative_path"],
+            "raw/cell.mrc#segmentation=fixture"
+        );
+        assert_eq!(derived[0]["role"], "segmentation_labels");
+        assert_eq!(derived[0]["human_review_required"], true);
+
+        let source_entry: DerivativeEntry = serde_json::from_value(source).unwrap();
+        let located =
+            locate_segmentation_derivative(&source_entry, "raw/cell.mrc#segmentation=fixture")
+                .unwrap();
+        assert_eq!(located.dtype, "uint8");
+        assert_eq!(located.shape_zyx, vec![2, 3, 4]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn private_workset_fixture(workset_id: &str) -> PathBuf {
         let root = std::env::temp_dir().join(unique_local_id("caos_private_workset_test"));
         fs::create_dir_all(&root).unwrap();
@@ -6138,6 +6564,10 @@ async fn main() {
         .route(
             "/api/volume/index-jobs",
             get(handle_list_index_jobs).post(handle_start_index_job),
+        )
+        .route(
+            "/api/volume/segmentation-jobs",
+            post(handle_start_segmentation_job),
         )
         .route(
             "/api/volume/index-batch-plan",
