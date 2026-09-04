@@ -6,6 +6,16 @@
     "nodejs_compat"
   ],
   "main": "worker.ts",
+  "routes": [
+    {
+      "pattern": "cellanatomy.org",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.cellanatomy.org",
+      "custom_domain": true
+    }
+  ],
   "assets": {
     "directory": "dist/client",
     "not_found_handling": "none",

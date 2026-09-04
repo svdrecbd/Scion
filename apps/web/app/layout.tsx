@@ -13,6 +13,7 @@ const ebGaramond = EB_Garamond({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://cellanatomy.org"),
   title: "Cell Anatomy",
   description: "Cross-repository lookup and comparison for whole-cell imaging datasets.",
   icons: {
