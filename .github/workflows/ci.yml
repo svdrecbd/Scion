@@ -35,7 +35,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: |
             apps/web/package-lock.json
@@ -74,6 +74,12 @@ jobs:
 
       - name: Run web build
         run: make web-build
+
+      - name: Run Cloudflare Worker build and deploy dry run
+        working-directory: apps/web
+        run: |
+          npm run build:vinext
+          npx wrangler deploy --dry-run --config dist/server/wrangler.json
 
       - name: Build packaged volume engine sidecar
         working-directory: apps/desktop

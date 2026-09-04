@@ -2,22 +2,47 @@
   "name": "scion-web",
   "private": true,
   "version": "0.1.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "dev:vinext": "vinext dev --port 3001",
+    "build:vinext": "vinext build",
+    "start:vinext": "wrangler dev --config dist/server/wrangler.json --persist-to .wrangler/state",
+    "deploy:vinext": "vinext-cloudflare deploy --config dist/server/wrangler.json",
+    "corpus:export-edge": "node scripts/export-edge-corpus.mjs",
+    "cloudflare:types": "wrangler types --config wrangler.jsonc",
+    "d1:migrate:local": "wrangler d1 migrations apply SIGNUPS_DB --local --config wrangler.jsonc",
+    "signups:export": "node scripts/export-beta-signups.mjs"
   },
   "dependencies": {
-    "next": "15.5.15",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "@vinext/cloudflare": "^1.0.0-beta.7",
+    "next": "^16.3.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-server-dom-webpack": "^19.2.8",
+    "vinext": "^1.0.0-beta.9"
   },
   "devDependencies": {
-    "@types/node": "22.7.4",
-    "@types/react": "18.3.3",
-    "@types/react-dom": "18.3.0",
-    "typescript": "5.6.2"
-  }
+    "@cloudflare/vite-plugin": "^1.54.4",
+    "@cloudflare/workers-types": "^5.20260904.1",
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vitejs/plugin-rsc": "^0.5.34",
+    "typescript": "5.6.2",
+    "vite": "^8.2.2",
+    "wrangler": "^4.129.0"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-darwin-arm64": "^1.2.7",
+    "lightningcss-darwin-arm64": "^1.33.0"
+  },
+  "type": "module"
 }

@@ -6,15 +6,9 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Logo } from "./logo";
 import { useCompare } from "../lib/compare-context";
 
-type NavbarProps = {
-  showPilot?: boolean;
-};
-
-export function Navbar({ showPilot = false }: NavbarProps) {
+export function Navbar() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
-  const [pilotVisible, setPilotVisible] = useState(showPilot);
-  const [reviewVisible, setReviewVisible] = useState(false);
   
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -69,36 +63,6 @@ export function Navbar({ showPilot = false }: NavbarProps) {
       setIsAdvancedOpen(false);
     }
   }, [isCorpusRoute]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    fetch("/pilot-status", { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((status: { enabled?: boolean } | null) => {
-        if (!cancelled && typeof status?.enabled === "boolean") {
-          setPilotVisible(status.enabled);
-        }
-      })
-      .catch(() => {
-        // Keep the server-rendered value if the runtime check fails.
-      });
-
-    fetch("/pilot-review-status", { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((status: { enabled?: boolean } | null) => {
-        if (!cancelled && typeof status?.enabled === "boolean") {
-          setReviewVisible(status.enabled);
-        }
-      })
-      .catch(() => {
-        setReviewVisible(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   return (
     <nav className="navbar-container">
@@ -183,19 +147,6 @@ export function Navbar({ showPilot = false }: NavbarProps) {
               <Link href="/plan" className="nav-link">
                 Plan
               </Link>
-              <Link href="/caos" className="nav-link">
-                CAOS
-              </Link>
-              {pilotVisible ? (
-                <Link href="/pilot" className="nav-link">
-                  Data
-                </Link>
-              ) : null}
-              {reviewVisible ? (
-                <Link href="/pilot/review" className="nav-link">
-                  Review
-                </Link>
-              ) : null}
               <Link href="/about" className="nav-link">
                 About
               </Link>

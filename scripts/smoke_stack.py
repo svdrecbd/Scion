@@ -74,7 +74,9 @@ def wait_for_status(url: str, *, timeout_seconds: float = 30.0) -> int:
         try:
             with urlopen(url, timeout=2) as response:
                 return int(response.status)
-        except (URLError, HTTPError) as exc:
+        except HTTPError as exc:
+            return int(exc.code)
+        except URLError as exc:
             last_error = exc
             time.sleep(0.25)
 
@@ -182,11 +184,12 @@ def main() -> None:
                 urls = [
                     f"http://127.0.0.1:{web_port}/",
                     f"http://127.0.0.1:{web_port}/guide",
-                    f"http://127.0.0.1:{web_port}/account",
+                    f"http://127.0.0.1:{web_port}/corpus?borderline=true",
                     f"http://127.0.0.1:{web_port}/analytics",
                     f"http://127.0.0.1:{web_port}/plan",
                     f"http://127.0.0.1:{web_port}/datasets/{dataset_ids[0]}",
                     f"http://127.0.0.1:{web_port}/compare?ids={dataset_ids[0]},{dataset_ids[1]}",
+                    f"http://127.0.0.1:{web_port}/api/datasets/export?format=csv&borderline=true",
                 ]
 
                 for url in urls:
@@ -195,15 +198,17 @@ def main() -> None:
                     if status != 200:
                         raise RuntimeError(f"Unexpected status {status} for {url}")
 
-                handoff_url = f"http://127.0.0.1:{web_port}/api/datasets/{dataset_ids[0]}/caos-handoff"
-                print(f"smoke: checking {handoff_url}", flush=True)
-                handoff = wait_for_json(handoff_url)
-                if (
-                    not isinstance(handoff, dict)
-                    or handoff.get("schema") != "cell-anatomy-caos-handoff"
-                    or handoff.get("dataset", {}).get("dataset_id") != dataset_ids[0]
-                ):
-                    raise RuntimeError("Atlas-to-CAOS handoff failed through the web/API boundary.")
+                removed_urls = [
+                    f"http://127.0.0.1:{web_port}/account",
+                    f"http://127.0.0.1:{web_port}/caos",
+                    f"http://127.0.0.1:{web_port}/pilot",
+                    f"http://127.0.0.1:{web_port}/api/datasets/{dataset_ids[0]}/caos-handoff",
+                ]
+                for url in removed_urls:
+                    print(f"smoke: confirming removed surface {url}", flush=True)
+                    status = wait_for_status(url)
+                    if status != 404:
+                        raise RuntimeError(f"Expected removed surface to return 404, got {status} for {url}")
 
     print("smoke test passed")
 

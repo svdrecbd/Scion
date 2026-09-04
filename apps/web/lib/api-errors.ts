@@ -12,9 +12,9 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
   if (error instanceof ScionApiError) {
     if (error.kind === "timeout") {
       return {
-        title: "The API timed out",
-        summary: `The backend did not answer in time while loading ${context}.`,
-        recommendation: "Retry the request or narrow the scope of the page if the backend is under load.",
+        title: "The request timed out",
+        summary: `The site did not finish loading ${context} in time.`,
+        recommendation: "Retry the request or narrow the scope of the page.",
         requestId: error.requestId,
         statusCode: error.statusCode
       };
@@ -22,9 +22,9 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
 
     if (error.kind === "abort") {
       return {
-        title: "The API request was interrupted",
+        title: "The request was interrupted",
         summary: `The request for ${context} was cancelled before it completed.`,
-        recommendation: "Retry the page. If this repeats, inspect the web and API logs together.",
+        recommendation: "Retry the page. If this repeats, inspect the Worker logs.",
         requestId: error.requestId,
         statusCode: error.statusCode
       };
@@ -32,9 +32,9 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
 
     if (error.statusCode === 503) {
       return {
-        title: "The backend is unavailable",
-        summary: `The API responded, but the backing corpus is unavailable or not ready while loading ${context}.`,
-        recommendation: "Check API readiness and Postgres state, then retry this page.",
+        title: "The site is temporarily unavailable",
+        summary: `The edge service could not load ${context}.`,
+        recommendation: "Retry the page and inspect the Worker logs if it fails again.",
         requestId: error.requestId,
         statusCode: error.statusCode
       };
@@ -43,7 +43,7 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
     if (error.statusCode === 404) {
       return {
         title: "The requested record was not found",
-        summary: `The API could not find the requested ${context}.`,
+        summary: `The corpus could not find the requested ${context}.`,
         recommendation: "Verify the URL or return to the corpus and select a valid record.",
         requestId: error.requestId,
         statusCode: error.statusCode
@@ -53,7 +53,7 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
     if (error.statusCode === 413) {
       return {
         title: "The request is too large",
-        summary: `The backend refused ${context} because it exceeded the current safety limit.`,
+        summary: `The site refused ${context} because it exceeded the current safety limit.`,
         recommendation: "Narrow the request scope and retry. Large exports should be filtered before downloading.",
         requestId: error.requestId,
         statusCode: error.statusCode
@@ -63,7 +63,7 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
     if (error.statusCode === 429) {
       return {
         title: "The service is throttling this request",
-        summary: `The backend is protecting itself under load while serving ${context}.`,
+        summary: `The site is protecting itself under load while serving ${context}.`,
         recommendation: "Retry after a short delay. If this repeats, reduce concurrent heavy requests or tighten the filters.",
         requestId: error.requestId,
         statusCode: error.statusCode
@@ -72,18 +72,18 @@ export function describeApiError(error: unknown, context: string): ApiFailureSta
 
     if (error.kind === "network") {
       return {
-        title: "The API could not be reached",
-        summary: `The web app could not reach the backend while loading ${context}.`,
-        recommendation: "Confirm the API process is running and that the configured base URL is correct.",
+        title: "The service could not be reached",
+        summary: `The site could not load ${context}.`,
+        recommendation: "Retry the page and confirm the Worker is available.",
         requestId: error.requestId,
         statusCode: error.statusCode
       };
     }
 
     return {
-      title: "The API request failed",
-      summary: `The backend returned an error while loading ${context}.`,
-      recommendation: "Retry the page and use the request ID below to inspect the API logs if it fails again.",
+      title: "The request failed",
+      summary: `The site returned an error while loading ${context}.`,
+      recommendation: "Retry the page and use the request ID below to inspect the Worker logs if it fails again.",
       requestId: error.requestId,
       statusCode: error.statusCode
     };

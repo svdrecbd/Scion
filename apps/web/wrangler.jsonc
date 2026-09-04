@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "scion-web",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "main": "worker.ts",
+  "assets": {
+    "directory": "dist/client",
+    "not_found_handling": "none",
+    "binding": "ASSETS"
+  },
+  "cache": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "SIGNUPS_DB",
+      "database_name": "cell-anatomy-site",
+      "database_id": "bb0c6579-28e6-48d8-8346-ad44e949c513",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  }
+}
